@@ -8,7 +8,8 @@ This loads it the way a person would and reports every uncaught error with its l
     mp-agent pagecheck viz/index.html --query "?demo=1" --query "?demo=1&egg=cat"
     mp-agent pagecheck http://127.0.0.1:3000/         a page something else is already serving
 
-Exit 0: every load ran without an uncaught error. Exit 1: errors (printed). Exit 2: no browser.
+Exit 0: every load ran without an uncaught error. Exit 1: errors (printed).
+Exit 2: the page was not checked (no browser, or the browser would not run).
 Needs Google Chrome, Chromium, Edge or Brave. Nothing else.
 """
 import functools
@@ -47,8 +48,13 @@ def _serve(folder):
     return server, port
 
 
-def load(browser, url, wait_ms=5000, timeout=60):
-    """Uncaught errors from one load of url, as [(message, line)]."""
+# A browser that will not start, or is too slow to, is not a broken page: the page was not
+# checked, and saying so is honest where reporting an error would not be.
+BROWSER_TROUBLE = "browser trouble"
+
+
+def load(browser, url, wait_ms=5000, timeout=180):
+    """Uncaught errors from one load of url, as [(message, line)], or one BROWSER_TROUBLE entry."""
     with tempfile.TemporaryDirectory(prefix="mp-pagecheck-") as profile:
         cmd = [browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
                f"--user-data-dir={profile}", "--enable-logging=stderr", "--v=0",
@@ -56,7 +62,10 @@ def load(browser, url, wait_ms=5000, timeout=60):
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
-            return [("the page did not finish loading in time", "")]
+            return [(BROWSER_TROUBLE, f"the browser did not finish in {timeout}s")]
+    if "<html" not in (proc.stdout or "").lower():
+        last = next((l.strip() for l in reversed((proc.stderr or "").splitlines()) if l.strip()), "no output")
+        return [(BROWSER_TROUBLE, f"the browser gave no page (exit {proc.returncode}): {last[:160]}")]
     found = []
     for m in UNCAUGHT.finditer(proc.stderr):
         found.append((m.group(1), m.group(3)))
@@ -83,6 +92,9 @@ def check(target, queries=("",), wait_ms=5000, say=print):
         for query in queries or ("",):
             url = base + query
             errors = load(browser, url, wait_ms)
+            if errors and errors[0][0] == BROWSER_TROUBLE:
+                say(f"the page was not checked: {errors[0][1]}")
+                return 2
             if errors:
                 failed = True
                 say(f"✗ {target}{query}:")

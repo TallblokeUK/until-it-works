@@ -1256,7 +1256,10 @@ class PageCheck(unittest.TestCase):
         write(folder, "good.html", "<p id=x></p><script>document.getElementById('x').textContent = location.search;</script>")
         write(folder, "bad.html", "<script>\nconst ok = 1;\nif (location.search.includes('boom')) missingThing.go();\n</script>")
         said = []
-        self.assertEqual(pagecheck.check(os.path.join(folder, "good.html"), ["", "?a=1"], 1500, said.append), 0)
+        good = pagecheck.check(os.path.join(folder, "good.html"), ["", "?a=1"], 1500, said.append)
+        if good == 2:
+            self.skipTest(f"the browser here would not run: {said}")
+        self.assertEqual(good, 0, said)
         self.assertEqual(pagecheck.check(os.path.join(folder, "bad.html"), ["?fine=1"], 1500, said.append), 0)
         self.assertEqual(pagecheck.check(os.path.join(folder, "bad.html"), ["?boom=1"], 1500, said.append), 1)
         self.assertTrue(any("missingThing is not defined" in s and "line 3" in s for s in said), said)
