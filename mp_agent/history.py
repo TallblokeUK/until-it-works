@@ -20,9 +20,13 @@ def _read(path, default=None):
         return default
 
 
-def summarize(runs_dir, limit=300):
+def summarize(runs_dir, limit=300, project=None):
+    """project: only runs in that folder (the workshop's project picker)."""
+    from .projects import project_of, same
     runs = []
     for run in sorted(glob.glob(os.path.join(runs_dir, "*")), reverse=True)[:limit]:
+        if project and not same(project_of(run), project):
+            continue
         meta = _read(os.path.join(run, "metadata.json"))
         if not meta or not os.path.exists(os.path.join(run, "plan.json")) and "units" not in meta:
             continue          # not finished, or a version-1 run without the details we count

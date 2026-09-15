@@ -9,6 +9,9 @@ itself the first time, and any time the models you chose stop being available.
 
 ## 1. Open the workshop
 
+Open **Until It Works(hop)** from your app launcher (Linux) or Launchpad and
+Spotlight (Mac). `./install.sh` adds it. Or, in a terminal:
+
 ```bash
 mp-viz
 ```
@@ -88,14 +91,25 @@ explains the roles and presets.
 
 When the box at the top says **Ready**, press **NEW JOB**.
 
-## Checking everything at once
+## 5. Protected repositories
 
-```bash
-mp-agent selftest
-```
+Some repositories must never be changed from here: a client's, or someone
+else's that you only work on copies of. Add the GitHub owner (`someone`), or a
+single repository (`someone/their-repo`), and press **PROTECT**. Protected
+repositories are marked in NEW JOB, and nothing is ever pushed to them or opened
+as a pull request. Jobs can still run on your local copy.
 
-It checks the tools your chosen team uses, then runs one tiny real job with all
-the checks. It takes about two minutes.
+From a terminal: `mp-agent protect add someone/their-repo`,
+`mp-agent protect remove …`, `mp-agent protect list`.
+
+## 6. Checking everything at once
+
+Press **RUN SELFTEST**. It checks the tools your chosen team uses, then runs one
+tiny real job through every step while you watch its log (and the job itself in
+the workshop). It takes about two minutes and uses a little of your models'
+allowance. At the end it says **all good**, or which item needs fixing and how.
+
+From a terminal: `mp-agent selftest`.
 
 ## Safety of the workshop page
 

@@ -38,10 +38,28 @@ your own command called `mp-agent` in a tool, it's left alone.
 
 ## 2. From the workshop
 
-Press **NEW JOB**. The form asks the same three things: what, where (a local
+Open **Until It Works(hop)** from your app launcher, Launchpad or Spotlight (or
+run `mp-viz`), and press **NEW JOB**. The form asks the same three things: what, where (a local
 project, a GitHub repository, a new project or a one-off) and which models.
 **START** runs it now; **ADD TO QUEUE** runs it after whatever is already
 running.
+
+### Working on one project
+
+The **PROJECT** picker at the top of the workshop narrows everything to one
+project:
+
+- **Run tabs:** only that project's runs, and "follow this project's newest"
+  follows its jobs, not everyone's.
+- **HISTORY and QUEUE:** only that project's runs and waiting jobs.
+- **NEW JOB:** starts in that project.
+- **The project bar** under the buttons shows how many results are waiting for
+  KEEP IT or DISCARD (press it to go to the first), and has MEMORY,
+  OPEN FOLDER and NEW JOB HERE.
+
+The picker lists every project a job has run in that still exists, with
+"running", "needs you" or "2 to keep or discard" beside the name. The choice is
+remembered in this browser. Choose **all projects** to see everything again.
 
 ## 3. From a terminal
 

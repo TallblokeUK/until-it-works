@@ -28,6 +28,7 @@ rm -f "$HOME/.cline/workflows/multipass.md"
 
 echo "installed: mp-agent, mp-status and mp-viz in ~/.local/bin"
 python3 "$here/bin/mp-agent" launchers --install
+python3 "$here/bin/mp-agent" app --install
 
 case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;

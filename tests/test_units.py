@@ -833,6 +833,10 @@ class WorkshopServer(unittest.TestCase):
             self.assertTrue(next(p for p in json.loads(text)["keys"]["providers"] if p["id"] == "openrouter")["stored"])
             self.assertEqual(call("/api/keys/remove", {"provider": "openrouter"}, good)[0], 200)
             self.assertEqual(call("/api/keys/set", {"provider": "../../x", "key": "abcdefghijk"}, good)[0], 400)
+            self.assertEqual(json.loads(call("/api/projects")[1]), [])
+            self.assertEqual(json.loads(call("/api/runs?project=/nowhere")[1]), [])
+            # a folder no run has worked in is never opened, whatever the page asks
+            self.assertEqual(call("/api/open-folder", {"project": home}, good)[0], 404)
         finally:
             server.terminate()
             server.wait(timeout=10)
@@ -928,3 +932,114 @@ class Answers(unittest.TestCase):
         self.assertIsNone(Context._read_answer(path))            # halfway through
         write(folder, "answer.json", '{"answer": " yes "}')
         self.assertEqual(Context._read_answer(path), "yes")
+
+
+class AppIcon(unittest.TestCase):
+    def test_icon_is_a_real_png_and_each_platform_gets_its_launcher(self):
+        import struct
+        import zlib
+        from mp_agent import appicon
+        data = appicon.png(64)
+        self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+        width, height = struct.unpack(">II", data[16:24])
+        self.assertEqual((width, height), (64, 64))
+        idat = data[data.index(b"IDAT") + 4:data.index(b"IEND") - 8]
+        self.assertEqual(len(zlib.decompress(idat)), 64 * (64 * 4 + 1))
+        home = tempfile.mkdtemp(prefix="mp-app-")
+        written = appicon.install(home, "/opt/uiw/bin/mp-viz", path_value="/usr/bin:/it's/here", platform="linux")
+        desktop = next(p for p in written if p.endswith(".desktop"))
+        with open(desktop) as fh:
+            entry = fh.read()
+        self.assertIn("Name=Until It Works(hop)", entry)
+        self.assertIn("Terminal=false", entry)
+        launcher = appicon.paths(home, "linux")["launcher"]
+        self.assertTrue(os.access(launcher, os.X_OK))
+        with open(launcher) as fh:
+            script = fh.read()
+        self.assertIn("--window", script)
+        out = subprocess.run(["sh", "-c", script.replace("exec ", "echo PATH=$PATH; : ", 1)], capture_output=True, text=True)
+        self.assertIn("PATH=/usr/bin:/it's/here", out.stdout)             # a quote in PATH survives
+        mac_home = tempfile.mkdtemp(prefix="mp-app-mac-")
+        mac = appicon.install(mac_home, "/opt/uiw/bin/mp-viz", path_value="/usr/bin", platform="darwin")
+        app = appicon.paths(mac_home, "darwin")["app"]
+        self.assertIn(app, mac)
+        self.assertTrue(os.access(os.path.join(app, "Contents", "MacOS", "launch"), os.X_OK))
+        with open(os.path.join(app, "Contents", "Info.plist")) as fh:
+            self.assertIn("<key>CFBundleExecutable</key><string>launch</string>", fh.read())
+
+
+class Protected(unittest.TestCase):
+    def test_protect_add_remove_keeps_the_rest_of_the_config(self):
+        from unittest import mock
+        from mp_agent import cli, where
+        state = tempfile.mkdtemp(prefix="mp-protect-")
+        write(state, "config.json", json.dumps({"max_usd": 3, "protected": ["someone"]}))
+        with mock.patch.object(cli, "STATE", state):
+            self.assertEqual(cli.protect_command(["add", "Other/Repo"]), 0)
+            self.assertEqual(cli.protect_command(["add", "not valid!"]), 1)
+            self.assertEqual(where.protected(state), ["other/repo", "someone"])
+            self.assertEqual(cli.protect_command(["remove", "someone"]), 0)
+            self.assertEqual(cli.protect_command(["remove", "nobody"]), 1)
+        with open(os.path.join(state, "config.json")) as fh:
+            self.assertEqual(json.load(fh), {"max_usd": 3, "protected": ["other/repo"]})
+        self.assertTrue(where.is_protected("git@github.com:other/repo.git", state))
+        self.assertFalse(where.is_protected("git@github.com:other/another.git", state))
+
+
+class ClineHub(unittest.TestCase):
+    def test_a_hub_whose_folder_was_removed_is_restarted_and_a_healthy_one_is_left(self):
+        from mp_agent import providers
+        alive = tempfile.mkdtemp(prefix="mp-hub-")
+        gone = os.path.join(tempfile.mkdtemp(prefix="mp-hub-"), "removed-worktree")
+        processes = [(111, f"node .cline --cline-hub-daemon --cwd {gone} --host 127.0.0.1 --port 1"),
+                     (222, f"node .cline --cline-hub-daemon --cwd {alive} --host 127.0.0.1 --port 2"),
+                     (333, "cline --cwd /x something else")]
+        self.assertEqual(providers.stale_cline_hubs(lambda: processes), [111])
+
+
+class Projects(unittest.TestCase):
+    def test_projects_count_runs_and_results_waiting_for_a_decision(self):
+        import json as j
+        from mp_agent import history, projects
+        runs = tempfile.mkdtemp(prefix="mp-proj-runs-")
+        shop, blog = tempfile.mkdtemp(prefix="shop-"), tempfile.mkdtemp(prefix="blog-")
+        gone = os.path.join(tempfile.mkdtemp(), "deleted")
+
+        def run(name, project, meta, live=False):
+            d = os.path.join(runs, name)
+            os.makedirs(d)
+            write(d, "repo", project + "\n")
+            write(d, "plan.json", "{}")
+            write(d, "metadata.json", j.dumps({"project": project, "units": {}, **meta}))
+            if live:
+                write(d, "question.json", "{}")
+            return d
+
+        run("r1", shop, {"approved": True, "resolution": {"action": "kept"}})
+        run("r2", shop, {"approved": True})                       # waiting for KEEP or DISCARD
+        run("r3", shop, {"approved": False})
+        run("r4", blog, {"approved": True, "oneoff": True})        # a one-off keeps itself
+        live = run("r5", blog, {}, live=True)
+        run("r6", gone, {"approved": True})
+        found = projects.list_projects(runs, alive=lambda d: d == live)
+        by_path = {p["path"]: p for p in found}
+        self.assertNotIn(os.path.realpath(gone), by_path)              # gone folders are not offered
+        s, b = by_path[os.path.realpath(shop)], by_path[os.path.realpath(blog)]
+        self.assertEqual((s["runs"], s["to_decide"], s["live"]), (3, 1, False))
+        self.assertEqual((b["runs"], b["to_decide"], b["live"], b["needs_you"]), (2, 0, True, True))
+        self.assertEqual(history.summarize(runs, project=shop)["totals"]["runs"], 3)
+        self.assertEqual(history.summarize(runs)["totals"]["runs"], 6)
+
+    def test_two_folders_with_the_same_name_are_told_apart(self):
+        from mp_agent import projects
+        runs = tempfile.mkdtemp(prefix="mp-proj-runs-")
+        a = os.path.join(tempfile.mkdtemp(prefix="clientA-"), "site")
+        b = os.path.join(tempfile.mkdtemp(prefix="clientB-"), "site")
+        for i, path in enumerate((a, b)):
+            os.makedirs(path)
+            d = os.path.join(runs, f"r{i}")
+            os.makedirs(d)
+            write(d, "repo", path)
+        names = sorted(p["name"] for p in projects.list_projects(runs, alive=lambda d: False))
+        self.assertEqual(len(set(names)), 2)
+        self.assertTrue(all(n.endswith("/site") for n in names))

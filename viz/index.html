@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Until It Works(hop)</title>
+<link rel="icon" type="image/png" href="icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
 <style>
@@ -48,7 +49,16 @@
     .right{contain:none;overflow:visible}
     .logpanel .log{height:9.5em;flex:none}
   }
-  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+  /* the name on one row, the buttons on their own row under it */
+  header{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
+  header .titlerow{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header .toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .projectpick{display:flex;align-items:center;gap:8px;font-size:17px;color:var(--dim)}
+  .projectpick select{font:inherit;font-size:18px;background:#0d0b1e;color:#fff;border:2px solid var(--edge);padding:2px 6px;max-width:340px}
+  .projectbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:18px;padding:4px 8px;border:2px solid var(--edge);background:#0d0b1ecc}
+  .projectbar .path{color:var(--dim);font-size:15px;overflow-wrap:anywhere}
+  .projectbar button{font-family:var(--crt);font-size:16px;background:var(--ink);color:var(--text);border:2px solid var(--edge);padding:1px 8px;cursor:pointer}
+  .projectbar button.attention{border-color:var(--gold);color:#fff3c4}
   h1{
     font-family:var(--pixel);font-size:clamp(12px,2.2vw,20px);margin:0;letter-spacing:1px;
     color:var(--cyan);text-shadow:0 0 6px #5ef2e699, 3px 3px 0 #ff4fa355;
@@ -103,6 +113,11 @@
   .setupbilling{display:flex;gap:8px;align-items:baseline;margin:6px 0;font-size:17px}
   .presetline{padding:5px 0;border-top:1px solid #2d2757;font-size:18px} .presetline.off{color:var(--dim)}
   .presetline small{display:block;color:var(--dim);font-size:15px}
+  .protectline{display:flex;gap:10px;align-items:center;padding:4px 0;border-top:1px solid #2d2757;font-size:18px}
+  .protectadd{display:flex;gap:8px;margin:6px 0}
+  .protectadd input{font:inherit;font-size:17px;background:#0d0b1e;color:#fff;border:2px solid var(--edge);padding:3px 6px;flex:1;max-width:420px}
+  #setupPanel .testresult.ok{color:#b9ffc9} #setupPanel .testresult.bad{color:#ffb4b4}
+  .selftestlog{max-height:28vh;overflow:auto;background:#07061a;border:1px solid var(--edge);padding:8px;font-size:15px;white-space:pre-wrap;margin:6px 0}
   @media (max-width:900px){ .setuprow{grid-template-columns:1fr} }
   #tidyList label.none{color:var(--dim)}
   #tidyList input{accent-color:#6dff8e}
@@ -204,8 +219,14 @@
 <body>
 <div class="cab">
   <header>
+    <div class="titlerow">
     <h1>UNTIL IT WORKS<b>(HOP)</b></h1>
     <span class="pill" id="pill"><i></i><span id="pillText">CONNECTING</span></span>
+    <label class="projectpick">PROJECT <select id="projectPick"><option value="">all projects</option></select></label>
+    <span class="spacer"></span>
+    <span class="hint" id="hint">live from ~/.mp-agent/runs · <a href="?demo=1">watch a demo</a></span>
+    </div>
+    <nav class="toolbar">
     <button class="stopbtn newbtn" id="openJob">NEW JOB</button>
     <button class="stopbtn setbtn" id="openQueue">QUEUE <span id="queueCount"></span></button>
     <button class="stopbtn setbtn" id="openHistory">HISTORY</button>
@@ -214,8 +235,8 @@
     <button class="stopbtn setbtn" id="openSetup">SETUP</button>
     <button class="stopbtn setbtn" id="openSettings">MODELS</button>
     <button class="stopbtn" id="stopRun" hidden>STOP RUN</button>
-    <span class="spacer"></span>
-    <span class="hint" id="hint">live from ~/.mp-agent/runs · <a href="?demo=1">watch a demo</a></span>
+    </nav>
+    <div class="projectbar" id="projectBar" hidden></div>
   </header>
   <div class="layout">
     <main class="left">
@@ -301,6 +322,13 @@
     <label class="setupbilling"><input type="checkbox" id="claudeBilling"> Pay for Claude Code with my Anthropic API key instead of a Claude subscription</label>
     <div class="setupsub">3 · Choose a team <span class="dim">you can change each role later in MODELS</span></div>
     <div id="setupPresets"></div>
+    <div class="setupsub">4 · Protected repositories <span class="dim">never pushed to and never given a pull request; an owner (someone) or a repository (someone/their-repo)</span></div>
+    <div id="setupProtected"></div>
+    <div class="protectadd"><input id="protectInput" autocomplete="off" spellcheck="false" placeholder="someone or someone/their-repo">
+      <button type="button" class="presetbtn" id="protectAdd">PROTECT</button></div>
+    <div class="setupsub">5 · Check everything <span class="dim">checks the tools your team uses, then runs one tiny real job through every step (about 2 minutes; uses a little of your models' allowance)</span></div>
+    <div class="answer"><button type="button" class="presetbtn" id="selftestRun">RUN SELFTEST</button> <span class="testresult" id="selftestResult"></span></div>
+    <pre class="selftestlog" id="selftestLog" hidden></pre>
     <div class="answer"><button type="button" class="quick" id="setupRescan">SCAN AGAIN</button>
       <button type="button" class="quick" data-close="setupPanel">CLOSE</button></div>
     <div class="how" id="setupStatus"></div>
@@ -1325,8 +1353,13 @@ async function refreshQueue(render) {
     const q = await (await fetch("api/queue", { cache: "no-store" })).json();
     $("queueCount").textContent = q.jobs.length ? `(${q.jobs.length})` : "";
     if (!render) return;
-    $("queueList").innerHTML = q.jobs.length ? "" : '<div class="dim">nothing waiting</div>';
-    q.jobs.forEach((j, i) => {
+    // with a project chosen, only the jobs that will run in it (other jobs keep their place in the queue)
+    const inProject = (j) => { const at = j.args.indexOf("--repo"); return at >= 0 && j.args[at + 1] === selectedProject; };
+    const jobs = selectedProject ? q.jobs.filter(inProject) : q.jobs;
+    const hidden = q.jobs.length - jobs.length;
+    $("queueList").innerHTML = jobs.length ? "" : '<div class="dim">nothing waiting' + (selectedProject ? " for this project" : "") + "</div>";
+    if (hidden) { const note = document.createElement("div"); note.className = "dim"; note.textContent = `${hidden} more for other projects (choose all projects to see them)`; $("queueList").appendChild(note); }
+    jobs.forEach((j, i) => {
       const row = document.createElement("div"); row.className = "qjob";
       const x = document.createElement("button"); x.textContent = "REMOVE";
       x.onclick = async () => { await postJSON("api/queue/remove", { id: j.id }); refreshQueue(true); };
@@ -1346,9 +1379,9 @@ $("openHistory").addEventListener("click", async () => {
   openOverlay("historyPanel");
   $("historyTotals").textContent = "loading…";
   try {
-    const h = await (await fetch("api/history", { cache: "no-store" })).json();
+    const h = await (await fetch(withProject("api/history"), { cache: "no-store" })).json();
     const t = h.totals;
-    $("historyTotals").textContent = `${t.runs} runs · ${t.approved} approved · ${t.hours} hours · $${t.billed_usd.toFixed(2)} billed`;
+    $("historyTotals").textContent = (currentProject() ? currentProject().name + ": " : "") + `${t.runs} runs · ${t.approved} approved · ${t.hours} hours · $${t.billed_usd.toFixed(2)} billed`;
     const esc = (v) => String(v ?? "").replace(/[<>&"]/g, "");
     $("historyProjects").innerHTML = "<tr><th>project</th><th>runs</th><th>approved</th><th>minutes</th><th>billed $</th></tr>" +
       h.projects.map((p) => `<tr><td>${esc(p.project)}</td><td>${p.runs}</td><td>${p.approved}</td><td>${Math.round(p.seconds / 60)}</td><td>${p.billed_usd.toFixed(3)}</td></tr>`).join("");
@@ -1384,7 +1417,9 @@ $("openMemory").addEventListener("click", async () => {
     $("memoryStatus").textContent = "No project has a memory yet: one is written when a run settles something (a ruling or your answer).";
     return;
   }
-  $("memoryText").value = (await loadMemory(data.projects[0].id)).text || "";
+  const mine = data.projects.find((p) => selectedProject && p.project === selectedProject);
+  if (mine) $("memoryProject").value = mine.id;
+  $("memoryText").value = (await loadMemory(mine ? mine.id : data.projects[0].id)).text || "";
 });
 $("memoryProject").addEventListener("change", async () => { $("memoryText").value = (await loadMemory($("memoryProject").value)).text || ""; });
 $("saveMemory").addEventListener("click", async () => {
@@ -1544,6 +1579,14 @@ function renderSetup() {
       el("div", {}, el("small", { text: `for ${k.for} · ${k.env}` }), el("small", {}, link), input, status), buttons));
   }
   $("claudeBilling").checked = info.claude_billing === "api";
+  // protected repositories
+  const prot = $("setupProtected"); prot.innerHTML = "";
+  if (!(info.protected || []).length) prot.append(el("div", { class: "protectline dim", text: "nothing protected" }));
+  for (const name of info.protected || []) {
+    const remove = el("button", { type: "button", class: "presetbtn", text: "REMOVE" });
+    remove.addEventListener("click", () => changeProtected("remove", name));
+    prot.append(el("div", { class: "protectline" }, el("b", { text: name }), remove));
+  }
   // presets
   const presets = $("setupPresets"); presets.innerHTML = "";
   for (const p of info.presets) {
@@ -1574,7 +1617,37 @@ async function testModel(spec, button, result) {
   } catch (e) { result.className = "testtestresult bad"; result.textContent = "could not test: the visualizer server is not running"; }
   button.disabled = false;
 }
-$("openSetup").addEventListener("click", () => { openOverlay("setupPanel"); loadSetup(); });
+$("openSetup").addEventListener("click", () => { openOverlay("setupPanel"); loadSetup(); pollSelftest(); });
+async function changeProtected(action, value) {
+  const res = await postJSON("api/protected", { action, value });
+  $("setupStatus").textContent = res.ok ? (await res.json()).detail : `not changed: ${await res.text()}`;
+  if (res.ok && action === "add") $("protectInput").value = "";
+  loadSetup(true);
+}
+$("protectAdd").addEventListener("click", () => {
+  const value = $("protectInput").value.trim();
+  if (value) changeProtected("add", value);
+});
+$("protectInput").addEventListener("keydown", (e) => { if (e.key === "Enter") $("protectAdd").click(); });
+let selftestTimer = null;
+async function pollSelftest() {
+  clearTimeout(selftestTimer);
+  let st;
+  try { st = await (await fetch("api/selftest", { cache: "no-store" })).json(); } catch (e) { return; }
+  const log = $("selftestLog");
+  if (st.log) { log.hidden = false; log.textContent = st.log; log.scrollTop = log.scrollHeight; }
+  $("selftestRun").disabled = st.running;
+  const result = $("selftestResult");
+  result.className = "testresult" + (st.result === "ok" ? " ok" : st.result === "failed" ? " bad" : "");
+  result.textContent = st.running ? "running… watch the job in the workshop too" :
+    st.result === "ok" ? "all good" : st.result === "failed" ? "something needs fixing: see the log" : "";
+  if (st.running && !$("setupPanel").hidden) selftestTimer = setTimeout(pollSelftest, 2000);
+}
+$("selftestRun").addEventListener("click", async () => {
+  const res = await postJSON("api/selftest", {});
+  if (!res.ok) { $("selftestResult").textContent = await res.text(); return; }
+  setTimeout(pollSelftest, 800);
+});
 $("setupRescan").addEventListener("click", () => loadSetup());
 $("claudeBilling").addEventListener("change", async () => {
   const res = await postJSON("api/settings", { claude_billing: $("claudeBilling").checked ? "api" : "subscription" });
@@ -1644,6 +1717,15 @@ $("openJob").addEventListener("click", async () => {
       $("jobGithub").appendChild(o);
     }
     for (const role of ROLE_NAMES) $("job-" + role).value = "";
+    if (selectedProject) {
+      // start in the chosen project
+      if (![...$("jobLocal").options].some((o) => o.value === selectedProject)) {
+        const o = document.createElement("option"); o.value = selectedProject; o.textContent = currentProject() ? currentProject().name : selectedProject;
+        $("jobLocal").prepend(o);
+      }
+      $("jobLocal").value = selectedProject;
+      document.querySelector('input[name="jobKind"][value="local"]').checked = true;
+    }
     fillJobModels(); showJobKind();
     $("jobStatus").textContent = "Everything happens on a separate branch; nothing is merged or pushed until you choose Keep.";
     $("jobTask").focus();
@@ -1757,18 +1839,73 @@ $("answerForm").addEventListener("submit", (e) => { e.preventDefault(); sendAnsw
 for (const b of document.querySelectorAll(".answer .quick")) b.addEventListener("click", () => sendAnswer(b.dataset.answer));
 
 let selectedRun = null;   // null: follow the newest live run
+// ---- project picker: one project's runs, history, queue, memory and new jobs ------------------------
+let selectedProject = null;   // a project folder, or null for all projects
+let projectList = [];
+try { selectedProject = new URLSearchParams(location.search).get("project") || localStorage.getItem("uiw.project") || null; } catch (e) { /* no storage */ }
+function withProject(url) {
+  if (!selectedProject) return url;
+  return url + (url.includes("?") ? "&" : "?") + "project=" + encodeURIComponent(selectedProject);
+}
+function currentProject() { return projectList.find((p) => p.path === selectedProject) || null; }
+function chooseProject(path) {
+  selectedProject = path || null;
+  try { if (selectedProject) localStorage.setItem("uiw.project", selectedProject); else localStorage.removeItem("uiw.project"); } catch (e) { /* no storage */ }
+  selectedRun = null;
+  renderProjects(); refreshTabs(); refreshQueue(!$("queuePanel").hidden);
+  if (!$("historyPanel").hidden) $("openHistory").click();
+}
+async function refreshProjects() {
+  if (DEMO) return;
+  try { projectList = await (await fetch("api/projects", { cache: "no-store" })).json(); } catch (e) { return; }
+  if (selectedProject && !currentProject()) chooseProject(null);          // the folder has gone
+  renderProjects();
+}
+function renderProjects() {
+  const pick = $("projectPick");
+  const label = (p) => p.name + (p.needs_you ? " · needs you" : p.live ? " · running" : "") + (p.to_decide ? ` · ${p.to_decide} to keep or discard` : "");
+  const wanted = [["", "all projects"], ...projectList.map((p) => [p.path, label(p)])];
+  if (pick.options.length !== wanted.length || [...pick.options].some((o, i) => o.value !== wanted[i][0] || o.textContent !== wanted[i][1])) {
+    pick.innerHTML = "";
+    for (const [value, text] of wanted) { const o = document.createElement("option"); o.value = value; o.textContent = text; pick.appendChild(o); }
+  }
+  pick.value = selectedProject || "";
+  const p = currentProject(), bar = $("projectBar");
+  bar.hidden = !p;
+  if (!p) return;
+  bar.innerHTML = "";
+  const button = (text, onclick, attention) => { const b = document.createElement("button"); b.type = "button"; b.textContent = text; b.onclick = onclick; if (attention) b.className = "attention"; return b; };
+  const name = document.createElement("b"); name.textContent = p.name;
+  const path = document.createElement("span"); path.className = "path"; path.textContent = p.path;
+  const count = document.createElement("span"); count.textContent = `${p.runs} run${p.runs === 1 ? "" : "s"}`;
+  bar.append(name, path, count);
+  if (p.to_decide) bar.append(button(`${p.to_decide} WAITING FOR KEEP OR DISCARD`, showFirstToDecide, true));
+  bar.append(button("NEW JOB HERE", () => $("openJob").click()), button("MEMORY", () => $("openMemory").click()),
+             button("OPEN FOLDER", () => postJSON("api/open-folder", { project: p.path })),
+             button("ALL PROJECTS", () => chooseProject(null)));
+}
+async function showFirstToDecide() {
+  try {
+    const runs = await (await fetch(withProject("api/runs"), { cache: "no-store" })).json();
+    const first = runs.filter((r) => !r.live && r.approved && !r.resolution && !r.oneoff).pop();
+    if (first) { selectedRun = first.run; refreshTabs(); }
+  } catch (e) { /* the state poll reports a dead server */ }
+}
+$("projectPick").addEventListener("change", () => chooseProject($("projectPick").value));
+setInterval(refreshProjects, 5000);
+refreshProjects();
 async function refreshTabs() {
   if (DEMO) return;
   try {
-    const runs = await (await fetch("api/runs", { cache: "no-store" })).json();
+    const runs = await (await fetch(withProject("api/runs"), { cache: "no-store" })).json();
     const live = runs.filter((r) => r.live);
-    const show = live.length > 1 || selectedRun;
+    const show = live.length > 1 || selectedRun || (selectedProject && runs.length > 0);
     $("tabs").hidden = !show;
     if (!show) return;
     $("tabs").innerHTML = "";
     const follow = document.createElement("button");
     follow.className = "tab" + (selectedRun ? "" : " on");
-    follow.textContent = "follow newest";
+    follow.textContent = selectedProject ? "follow this project's newest" : "follow newest";
     follow.onclick = () => { selectedRun = null; refreshTabs(); };
     $("tabs").appendChild(follow);
     for (const r of runs) {
@@ -1790,7 +1927,7 @@ refreshTabs();
 async function poll() {
   const t = performance.now() / 1000;
   try {
-    const url = selectedRun ? `api/state?run=${encodeURIComponent(selectedRun)}` : "api/state";
+    const url = selectedRun ? `api/state?run=${encodeURIComponent(selectedRun)}` : withProject("api/state");
     const next = DEMO ? demoState() : await (await fetch(url, { cache: "no-store" })).json();
     ingest(next, t);
   } catch (e) {

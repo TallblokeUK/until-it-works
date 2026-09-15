@@ -41,7 +41,8 @@ it also says `~/.local/bin is not on your PATH`, add the line it shows to your
 shell profile and open a new terminal. (`mp-agent` is the command; the name is
 short for multi-pass agent.)
 
-**2. Set up.**
+**2. Set up.** Open **Until It Works(hop)** from your app launcher, or Launchpad
+and Spotlight on a Mac (the installer adds it), or run:
 
 ```bash
 mp-viz
@@ -53,6 +54,9 @@ The workshop opens at http://127.0.0.1:7788 with **SETUP** showing:
   to fix any that aren't. Press **TEST** to check one really answers.
 - **API keys:** add any you want to use. They are kept in your system keychain.
 - **Choose a team:** press **USE THIS TEAM** on one of the presets.
+- **Protected repositories and a self-test:** protect repositories that must
+  never be pushed to, and **RUN SELFTEST** to check everything with one tiny
+  real job.
 
 When the box at the top says **Ready**, you're set. [The setup guide](docs/setup.md)
 walks through every part of the screen.
@@ -66,7 +70,8 @@ Say what you want, pick the project, and confirm the models:
 ```
 
 Watch it in the workshop. When it finishes, **VIEW CHANGES** shows the diff and
-the judge's notes, and **KEEP IT** merges the work into your project.
+the judge's notes, and **KEEP IT** merges the work into your project. Working on
+several projects? The **PROJECT** picker narrows the workshop to one of them.
 
 ## How it decides it's done
 
@@ -117,12 +122,13 @@ finished. [How it works](docs/how-it-works.md) has the detail.
 
 | Command | Does |
 |---|---|
-| `mp-viz` | open the workshop |
+| `mp-viz` | open the workshop (or use the app icon) |
 | `mp-agent start "task"` | start a job from a terminal (`--repo`, `--github`, `--new`, `--oneoff`) |
 | `mp-status` | what's running, and any question waiting for you |
 | `mp-agent answer "…"` | answer that question |
 | `mp-agent setup` / `models` / `keys` / `test MODEL` | setup from a terminal |
-| `mp-agent selftest` | check everything, then run one tiny real job |
+| `mp-agent selftest` | check everything, then run one tiny real job (also a button in SETUP) |
+| `mp-agent protect add owner/repo` | never push to that repository (also in SETUP) |
 | `mp-agent tidy` | clear away old leftovers (never your projects or branches) |
 
 `mp-agent --help` lists the rest.

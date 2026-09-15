@@ -14,6 +14,8 @@
     mp-agent keys list | set P | remove P   API keys, kept in the system keychain
     mp-agent test MODEL [--json]         one tiny call, to check a model works
     mp-agent launchers [--install]       /mp-agent in Claude Code, Codex, Gemini CLI, OpenCode, Qwen Code and Cline
+    mp-agent app [--install]             an app icon that opens the workshop without a terminal
+    mp-agent protect [add|remove OWNER[/REPO]]   repositories that are never pushed to
     mp-agent models [--json]             the models available for each role, the presets, the current choices
     mp-agent where [--json] [--refresh]  where a job can run: recent local projects, GitHub repos, new, one-off
     mp-agent pr [--run DIR] [--base BRANCH]   push a finished run's branch and open a GitHub pull request
@@ -578,6 +580,8 @@ def selftest(argv):
         check("claude logged in on a subscription", bool(auth.get("loggedIn")) and auth.get("authMethod") == "claude.ai",
               f"{auth.get('authMethod')} / {auth.get('subscriptionType')}" if auth else "no answer from claude")
     if chosen and chosen["worker"].startswith("cline:") and shutil.which("cline"):
+        if providers.restart_stale_cline_hubs(print):
+            time.sleep(2)
         # Cline's background process reads MCP settings when it starts, so a server
         # added later is invisible until that process restarts.
         probe = subprocess.run(["cline", "--cwd", tempfile.gettempdir(), "--provider", chosen["worker"].split(":")[1],
@@ -622,6 +626,53 @@ def selftest(argv):
     shutil.rmtree(folder, ignore_errors=True)
     print("\nall good" if ok else f"\nsomething is wrong; the logs are in {latest}")
     return 0 if ok else 1
+
+
+def protect_command(argv):
+    """mp-agent protect [list | add OWNER[/REPO] | remove OWNER[/REPO]]: GitHub accounts or
+    repositories that are never pushed to and never get a pull request."""
+    action, rest = (argv[0], argv[1:]) if argv else ("list", [])
+    current = places.protected(STATE)
+    if action == "list":
+        if "--json" in rest:
+            print(json.dumps(current))
+            return 0
+        print("\n".join(f"  {p}" for p in current) or "  (nothing protected)")
+        print("\nadd one: mp-agent protect add someone   or   mp-agent protect add someone/their-repo")
+        return 0
+    if action in ("add", "remove") and rest:
+        value = rest[0].strip().strip("/")
+        if action == "add":
+            if not places.PROTECTED_RE.match(value):
+                print("not changed: give a GitHub owner (someone) or a repository (someone/their-repo)", file=sys.stderr)
+                return 1
+            saved = places.set_protected(STATE, current + [value])
+        else:
+            if value.lower() not in current:
+                print(f"not changed: {value} is not protected", file=sys.stderr)
+                return 1
+            saved = places.set_protected(STATE, [p for p in current if p != value.lower()])
+        print("protected: " + (", ".join(saved) or "nothing"))
+        return 0
+    print("mp-agent protect [list | add OWNER[/REPO] | remove OWNER[/REPO]]", file=sys.stderr)
+    return 2
+
+
+def app_command(argv):
+    """mp-agent app [--install]: an app icon that opens the workshop without a terminal."""
+    from . import appicon
+    viz = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "bin", "mp-viz")
+    viz = os.path.realpath(viz)
+    if "--install" not in argv:
+        for name, path in appicon.paths(HOME).items():
+            print(f"  {name:9} {path}")
+        print("\nrun `mp-agent app --install` to add the icon")
+        return 0
+    for path in appicon.install(HOME, viz):
+        print(f"  wrote {path}")
+    where = "your applications (Launchpad and Spotlight)" if sys.platform == "darwin" else "your app launcher"
+    print(f"\n{appicon.APP_NAME} is in {where}; it opens the workshop.")
+    return 0
 
 
 def launchers_command(argv):
@@ -914,6 +965,10 @@ def main(argv):
         return set_config(argv[1:])
     if argv and argv[0] == "setup":
         return setup_command(argv[1:])
+    if argv and argv[0] == "protect":
+        return protect_command(argv[1:])
+    if argv and argv[0] == "app":
+        return app_command(argv[1:])
     if argv and argv[0] == "launchers":
         return launchers_command(argv[1:])
     if argv and argv[0] == "keys":
@@ -953,6 +1008,8 @@ def main(argv):
     usage = providers.Usage(lambda totals: run.write_json("usage.json", totals), tree_prefix, run.started - 60)
     mcp_config = ensure_mcp_config()
 
+    if any(spec.startswith("cline:") for spec in models.effective(choices).values() if spec):
+        providers.restart_stale_cline_hubs(run.say)
     from . import keys
     key_env = keys.environment(STATE)
     claude_key = None

@@ -18,7 +18,7 @@ from the page itself).
 import http.server, json, os, re, shutil, signal, subprocess, sys, threading, time, urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
-from mp_agent import actions, desktop, history, jobqueue, memory, tidy  # noqa: E402
+from mp_agent import actions, desktop, history, jobqueue, memory, projects, tidy  # noqa: E402
 from mp_agent.models import ROLES  # noqa: E402
 
 STATE = os.environ.get("MP_HOME", os.path.join(os.path.expanduser("~"), ".mp-agent"))
@@ -60,12 +60,16 @@ def all_runs():
     return [r for r in runs if os.path.isdir(r)]
 
 
-def run_list():
-    """Live runs, then the few most recent finished ones, for the tab bar."""
+def in_project(run, project):
+    return not project or projects.same(projects.project_of(run), project)
+
+
+def run_list(project=None):
+    """Live runs, then the few most recent finished ones, for the tab bar (of one project, if chosen)."""
     out = []
-    for r in all_runs()[:30]:
+    for r in [r for r in all_runs() if in_project(r, project)][:30]:
         is_live = alive(r)
-        if not is_live and len([o for o in out if not o["live"]]) >= 4:
+        if not is_live and len([o for o in out if not o["live"]]) >= (8 if project else 4):
             continue
         meta = {}
         try:
@@ -73,13 +77,14 @@ def run_list():
         except ValueError:
             pass
         out.append({"run": os.path.basename(r), "task": read(os.path.join(r, "task.md")).strip()[:80],
-                    "live": is_live, "approved": meta.get("approved"),
+                    "live": is_live, "approved": meta.get("approved"), "oneoff": bool(meta.get("oneoff")),
+                    "resolution": (meta.get("resolution") or {}).get("action"),
                     "waiting": is_live and os.path.exists(os.path.join(r, "question.json"))})
     return out
 
 
-def state(wanted=None):
-    runs = all_runs()
+def state(wanted=None, project=None):
+    runs = [r for r in all_runs() if in_project(r, project)]
     chosen = os.path.join(RUNS, os.path.basename(wanted)) if wanted else None
     if chosen and os.path.isdir(chosen):
         run = chosen
@@ -131,6 +136,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.reply(403, "text/plain", b"forbidden")
         return False
 
+    def query_value(self, name):
+        from urllib.parse import parse_qs, urlparse
+        return (parse_qs(urlparse(self.path).query).get(name) or [None])[0]
+
     def body(self, limit=10_000):
         return json.loads(self._raw[:limit] or b"{}")
 
@@ -138,6 +147,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         global last_poll, last_busy
         if not self.host_ok():
             return
+        query = self.query_value
         path = self.path.split("?")[0]
         if path == "/api/where":
             entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
@@ -151,6 +161,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                   timeout=120)
             return self.reply(200 if proc.returncode == 0 else 500, "application/json",
                               (proc.stdout or json.dumps({"error": proc.stderr[-500:]})).encode())
+        if path == "/api/selftest":
+            return self.reply(200, "application/json", json.dumps(selftest_state()).encode())
         if path == "/api/models":
             entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
             proc = subprocess.run([sys.executable, entry, "models", "--json"], capture_output=True, text=True,
@@ -162,7 +174,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/queue":
             return self.reply(200, "application/json", json.dumps(jobqueue.listing(STATE)).encode())
         if path == "/api/history":
-            return self.reply(200, "application/json", json.dumps(history.summarize(RUNS)).encode())
+            return self.reply(200, "application/json",
+                              json.dumps(history.summarize(RUNS, project=query("project"))).encode())
+        if path == "/api/projects":
+            return self.reply(200, "application/json", json.dumps(projects.list_projects(RUNS, alive)).encode())
         if path == "/api/memory":
             from urllib.parse import parse_qs, urlparse
             wanted = (parse_qs(urlparse(self.path).query).get("id") or [None])[0]
@@ -184,16 +199,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with open(file, "rb") as fh:
                 return self.reply(200, "image/jpeg" if name.lower().endswith((".jpg", ".jpeg")) else "image/png", fh.read())
         if path == "/api/runs":
-            return self.reply(200, "application/json", json.dumps(run_list()).encode())
+            return self.reply(200, "application/json", json.dumps(run_list(query("project"))).encode())
         if path == "/api/state":
             last_poll = time.time()
             from urllib.parse import parse_qs, urlparse
-            s = state((parse_qs(urlparse(self.path).query).get("run") or [None])[0])
+            s = state((parse_qs(urlparse(self.path).query).get("run") or [None])[0], query("project"))
             if s.get("live"):
                 last_busy = time.time()
             self.reply(200, "application/json", json.dumps(s).encode())
         elif path == "/api/watched":
             self.reply(200, "application/json", json.dumps({"watched": time.time() - last_poll < 6}).encode())
+        elif path == "/icon.png":
+            from mp_agent import appicon
+            self.reply(200, "image/png", appicon.png(64))
         elif path in ("/", "/index.html"):
             try:
                 with open(PAGE, "rb") as f:
@@ -306,12 +324,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.reply(400, "text/plain", b"bad request")
         if path == "/api/open-folder":
             try:
-                length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-                name = os.path.basename(str(json.loads(self._raw[:length] or b"{}").get("run") or ""))
-                meta = json.loads(read(os.path.join(RUNS, name, "metadata.json")) or "{}")
+                body = self.body()
+                name = os.path.basename(str(body.get("run") or ""))
+                meta = json.loads(read(os.path.join(RUNS, name, "metadata.json")) or "{}") if name else {}
             except ValueError:
                 return self.reply(400, "text/plain", b"bad request")
             folder = os.path.realpath(meta.get("project") or "")
+            if body.get("project"):
+                # only a folder a run has worked in, never an arbitrary path
+                known = [p["path"] for p in projects.list_projects(RUNS, alive)]
+                folder = next((p for p in known if projects.same(p, str(body["project"]))), "")
             if not folder.startswith(os.path.realpath(HOME) + os.sep) or not os.path.isdir(folder):
                 return self.reply(404, "text/plain", b"no such folder")
             desktop.open_folder(folder)
@@ -332,6 +354,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 proc = subprocess.run([sys.executable, entry, "keys", "remove", provider], capture_output=True,
                                       text=True, timeout=30)
+            if proc.returncode != 0:
+                return self.reply(409, "text/plain", (proc.stderr or proc.stdout).strip().encode())
+            return self.reply(200, "application/json", json.dumps({"detail": proc.stdout.strip()}).encode())
+        if path == "/api/selftest":
+            state = selftest_state()
+            if state["running"]:
+                return self.reply(409, "text/plain", b"the selftest is already running")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            os.makedirs(STATE, exist_ok=True)
+            with open(SELFTEST_LOG, "w") as log:
+                proc = subprocess.Popen([sys.executable, "-u", entry, "selftest"], stdout=log, stderr=subprocess.STDOUT,
+                                        stdin=subprocess.DEVNULL, cwd=HOME, start_new_session=True)
+            with open(SELFTEST_LOG + ".pid", "w") as fh:
+                fh.write(str(proc.pid))
+            return self.reply(200, "application/json", json.dumps({"started": True}).encode())
+        if path == "/api/protected":
+            try:
+                body = self.body()
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            action, value = str(body.get("action") or ""), str(body.get("value") or "").strip()
+            if action not in ("add", "remove") or not re.fullmatch(r"[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?", value.strip("/")):
+                return self.reply(400, "text/plain", b"give a GitHub owner (someone) or a repository (someone/their-repo)")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            proc = subprocess.run([sys.executable, entry, "protect", action, value], capture_output=True, text=True,
+                                  timeout=30)
             if proc.returncode != 0:
                 return self.reply(409, "text/plain", (proc.stderr or proc.stdout).strip().encode())
             return self.reply(200, "application/json", json.dumps({"detail": proc.stdout.strip()}).encode())
@@ -458,6 +506,26 @@ def get(path):
         return None
 
 
+SELFTEST_LOG = os.path.join(STATE, "selftest.log")
+
+
+def selftest_state():
+    """Whether a selftest started from SETUP is running, what it has printed, and how it ended."""
+    log = read(SELFTEST_LOG)[-6000:] if os.path.exists(SELFTEST_LOG) else ""
+    running = False
+    try:
+        with open(SELFTEST_LOG + ".pid") as fh:
+            pid = int(fh.read().strip())
+        os.kill(pid, 0)
+        running = "selftest" in desktop.command_of(pid)
+    except (OSError, ValueError):
+        pass
+    result = None
+    if log and not running:
+        result = "ok" if "\nall good" in log else "failed"
+    return {"running": running, "log": log, "result": result}
+
+
 def open_browser():
     """Open the workshop in its own app-style window, so it can sit beside your
     editor or terminal rather than getting lost among browser tabs."""
@@ -498,11 +566,12 @@ def main():
     if "--stop" in args:
         print("stopped" if get("api/stop") else "not running"); return
     want_open = "--no-open" not in args
+    always = "--window" in args          # from the app icon: the person asked for a window
 
     running = get("api/watched")
     if running is not None:
-        # Already serving. Only open a tab if nobody is looking at one.
-        if want_open and not running.get("watched"):
+        # Already serving. Only open a window if nobody is looking at one, or if asked for one.
+        if want_open and (always or not running.get("watched")):
             open_browser()
         else:
             print(f"visualizer: {URL}")

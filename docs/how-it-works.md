@@ -85,7 +85,8 @@ audits and rulings; the Builder codes at the desk; Checkbot runs the test rig;
 Red Pen reviews; three interns form the pre-audit panel; each swarm subtask
 gets its own mini builder at a labelled desk, and they carry their work to the
 rig when a wave merges. When a run needs you, the phone rings and the question
-appears under the screen. `?demo=1` plays a scripted swarm run for free.
+appears under the screen. The PROJECT picker narrows the run tabs, HISTORY,
+QUEUE and NEW JOB to one project. `?demo=1` plays a scripted swarm run for free.
 
 ## Tests
 

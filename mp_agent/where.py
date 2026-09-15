@@ -29,6 +29,26 @@ def protected(state_dir=None):
     return [str(e).strip().strip("/").lower() for e in entries if str(e).strip().strip("/")]
 
 
+PROTECTED_RE = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?$")
+
+
+def set_protected(state_dir, entries):
+    """Save the protected list (owner or owner/repo), keeping the rest of the config."""
+    state_dir = state_dir or os.environ.get("MP_HOME") or os.path.join(os.path.expanduser("~"), ".mp-agent")
+    path = os.path.join(state_dir, "config.json")
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    data["protected"] = sorted(dict.fromkeys(e.strip().strip("/").lower() for e in entries if e.strip().strip("/")))
+    os.makedirs(state_dir, exist_ok=True)
+    with open(path + ".tmp", "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(path + ".tmp", path)
+    return data["protected"]
+
+
 def is_protected(remote, state_dir=None):
     name = (github_name(remote) or "").lower()
     return bool(name) and any(name == p or name.startswith(p + "/") for p in protected(state_dir))

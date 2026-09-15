@@ -320,6 +320,38 @@ class ClineAgent(Agent):
         return run_cli(cmd, cwd, self.timeout + 60, on_line=self._watcher(parse))
 
 
+def stale_cline_hubs(list_processes=None):
+    """Cline's background hub loads the MCP tools, and keeps the folder of the call that started
+    it. When that was a job's worktree, cleaning the worktree up leaves a hub that can no longer
+    start any tool, so every later Cline worker silently has none. Returns those hubs' pids."""
+    if list_processes is None:
+        def list_processes():
+            try:
+                out = subprocess.run(["pgrep", "-f", "cline-hub-daemon"], capture_output=True, text=True, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                return []
+            from .desktop import command_of
+            return [(int(pid), command_of(pid)) for pid in out.stdout.split() if pid.isdigit()]
+    stale = []
+    for pid, command in list_processes():
+        m = re.search(r"--cline-hub-daemon.*?--cwd (\S+)", command)
+        if m and not os.path.isdir(m.group(1)):
+            stale.append(pid)
+    return stale
+
+
+def restart_stale_cline_hubs(say=lambda m: None, list_processes=None):
+    """Stop hubs whose folder is gone; Cline starts a fresh one on its next call."""
+    stale = stale_cline_hubs(list_processes)
+    for pid in stale:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+        say(f"   restarted Cline's background hub (its folder had been removed, so its tools were not loading)")
+    return len(stale)
+
+
 def cline_usage(worktree_prefix, since, sessions=None):
     """Tokens and cost per model for the Cline sessions that ran in this run's
     worktrees (Cline records both, with the folder each session ran in)."""

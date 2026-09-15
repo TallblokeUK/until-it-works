@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 
-from . import keys, models
+from . import keys, models, where
 from .providers import classify, error_line, make_agent
 
 TOOLS = [
@@ -65,6 +65,7 @@ def scan(state_dir):
         "ready": chosen,
         "ready_detail": problem or "the chosen models are all available",
         "first_time": not os.path.exists(models.config_path(state_dir)),
+        "protected": where.protected(state_dir),
     }
 
 
