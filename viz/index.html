@@ -1,0 +1,1801 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Until It Works(hop)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --night:#0d0b1e; --ink:#1b1838; --bezel:#241f4a; --edge:#3b3470;
+    --cyan:#5ef2e6; --magenta:#ff4fa3; --gold:#f4c542; --green:#6dff8e; --red:#ff5a5a;
+    --text:#e9e6ff; --dim:#8c86b8;
+    --pixel:"Press Start 2P", ui-monospace, monospace;
+    --crt:"VT323", ui-monospace, monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--night);color:var(--text)}
+  body{
+    min-height:100vh;padding:18px 16px 28px;font-family:var(--crt);font-size:20px;
+    background:
+      radial-gradient(1200px 500px at 50% -10%, #2a2160 0%, transparent 60%),
+      repeating-linear-gradient(90deg, transparent 0 31px, #ffffff05 31px 32px),
+      var(--night);
+  }
+  [hidden]{display:none!important}
+  .cab{max-width:1960px;margin:0 auto}
+  /* two columns: the scene and the job on the left; what needs you, the log and tokens on the right */
+  .layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,440px);gap:16px;align-items:start}
+  .left{min-width:0;position:relative}
+  .presetpick{display:flex;flex-direction:column;gap:4px;margin:6px 0 10px}
+  .presetpick small{color:var(--dim)}
+  /* the NEW JOB form and MODELS panel float over the scene instead of pushing it down */
+  .left > .settings{position:absolute;top:0;left:0;right:0;z-index:20;margin:0;box-shadow:0 18px 60px #000d, 0 0 0 4px #0d0b1ecc;max-height:calc(100vh - 90px);overflow:auto}
+  /* the right column is exactly as tall as the left one (contain:size stops its own content
+     growing the row), so only the log scrolls and the page never gets a second scroll bar */
+  .right{display:flex;flex-direction:column;gap:14px;min-width:0;align-self:stretch;contain:size;overflow-y:auto}
+  .right .question,.right .result{margin-top:0}
+  .logpanel{flex:1 1 auto;min-height:140px;display:flex;flex-direction:column}
+  .logpanel .log{flex:1 1 auto;height:auto;overflow-y:auto;-webkit-mask-image:none;mask-image:none;justify-content:flex-start;display:block}
+  .jobrow{display:flex;flex-direction:column;gap:14px;margin-top:14px}
+  .jobrow > .panel{margin:0}
+  .job .stats{margin-top:6px}
+  .dim{color:var(--dim);font-family:var(--crt);font-size:15px;letter-spacing:0}
+  .cast .who{font-style:normal;color:var(--dim)} .cast .who:not(:empty)::before{content:" · "}
+  @media (max-width:1180px){
+    .layout{grid-template-columns:1fr}
+    .right{contain:none;overflow:visible}
+    .logpanel .log{height:9.5em;flex:none}
+  }
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+  h1{
+    font-family:var(--pixel);font-size:clamp(12px,2.2vw,20px);margin:0;letter-spacing:1px;
+    color:var(--cyan);text-shadow:0 0 6px #5ef2e699, 3px 3px 0 #ff4fa355;
+  }
+  h1 b{color:var(--magenta);text-shadow:0 0 6px #ff4fa399}
+  .pill{font-family:var(--pixel);font-size:10px;padding:7px 10px;border:2px solid var(--edge);background:var(--ink);display:inline-flex;gap:8px;align-items:center}
+  .pill i{width:9px;height:9px;display:inline-block;background:var(--dim)}
+  .pill.live i{background:var(--red);animation:blink 1s steps(2) infinite}
+  .pill.ok i{background:var(--green)} .pill.bad i{background:var(--red)}
+  @keyframes blink{50%{opacity:.15}}
+  .spacer{flex:1}
+  .stopbtn.setbtn{color:var(--cyan);border-color:var(--cyan);background:var(--ink)}
+  .settings{margin-bottom:14px;border:3px solid var(--cyan);background:var(--ink);padding:12px 14px}
+  .changesgrid{display:grid;grid-template-columns:minmax(160px,240px) minmax(0,1fr);gap:10px;margin-top:6px}
+  .filelist{display:flex;flex-direction:column;gap:2px;max-height:52vh;overflow:auto}
+  .filelist button{font:inherit;font-size:17px;text-align:left;background:#0d0b1e;color:var(--text);border:1px solid var(--edge);padding:3px 6px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .filelist button.on{border-color:var(--cyan);color:#fff}
+  .filelist .add{color:var(--green)} .filelist .del{color:#ff9a9a}
+  pre.diff{margin:0;max-height:52vh;overflow:auto;background:#07061a;border:1px solid var(--edge);padding:8px;font-size:15px;line-height:1.25;white-space:pre}
+  pre.diff .a{color:#6dff8e} pre.diff .d{color:#ff8a8a} pre.diff .h{color:#5ef2e6} pre.diff .m{color:var(--dim)}
+  .judgenotes{margin-top:8px} .judgenotes pre{white-space:pre-wrap;max-height:24vh;overflow:auto;font-size:16px;background:#07061a;padding:8px;border:1px solid var(--edge)}
+  .judgenotes summary{cursor:pointer;color:var(--gold)}
+  .prrow input{flex:0 1 220px;font:inherit;font-size:19px;background:#0d0b1e;color:#fff;border:2px solid var(--edge);padding:4px 8px}
+  .shots{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .shots a img{height:70px;border:2px solid var(--edge);image-rendering:auto}
+  .histgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+  table.plain{border-collapse:collapse;width:100%;font-size:17px}
+  table.plain th{font-family:var(--pixel);font-size:8px;color:var(--dim);text-align:left;padding:3px 6px;font-weight:normal}
+  table.plain td{padding:2px 6px;border-top:1px solid #2d2757;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:420px}
+  table.clickable tr[data-run]{cursor:pointer} table.clickable tr[data-run]:hover td{background:#2d2757}
+  .bar{display:flex;align-items:center;gap:8px;font-size:17px;margin:3px 0}
+  .bar i{display:inline-block;height:10px;background:var(--magenta)}
+  #memoryText{width:100%;font:inherit;font-size:17px;background:#07061a;color:#fff;border:2px solid var(--edge);padding:8px;margin-top:6px;resize:vertical}
+  #queueList .qjob{display:flex;gap:10px;align-items:center;padding:4px 0;border-top:1px solid #2d2757;font-size:18px}
+  #tidyList label{display:flex;gap:10px;align-items:baseline;padding:4px 0;border-top:1px solid #2d2757;font-size:19px}
+  #setupPanel{max-height:calc(100vh - 90px);overflow:auto}
+  .setupready{font-size:20px;margin:4px 0 8px;padding:6px 8px;border:2px solid var(--edge)}
+  .setupready.ok{border-color:#6dff8e;color:#b9ffc9} .setupready.bad{border-color:var(--gold);color:#fff3c4}
+  .setupsub{margin:12px 0 4px;color:var(--gold);font-size:19px}
+  .setuprow{display:grid;grid-template-columns:minmax(120px,160px) minmax(130px,170px) 1fr auto;gap:10px;align-items:start;padding:6px 0;border-top:1px solid #2d2757;font-size:18px}
+  .setuprow .badge{font-size:15px;padding:1px 6px;border:2px solid var(--edge);justify-self:start}
+  .setuprow .badge.ready{border-color:#6dff8e;color:#b9ffc9} .setuprow .badge.half{border-color:var(--gold);color:#fff3c4}
+  .setuprow .badge.none{color:var(--dim)}
+  .setuprow small{display:block;color:var(--dim);font-size:15px;overflow-wrap:anywhere}
+  .setuprow code{font-size:15px;background:#0d0b1e;padding:1px 4px;overflow-wrap:anywhere}
+  .setuprow .testresult{display:block;font-size:15px;margin-top:2px}
+  .setuprow .testresult.ok{color:#b9ffc9} .setuprow .testresult.bad{color:#ffb4b4}
+  .setuprow input[type=password]{font:inherit;font-size:17px;background:#0d0b1e;color:#fff;border:2px solid var(--edge);padding:3px 6px;width:100%;margin-top:4px}
+  .setuprow button,.presetbtn{font-family:var(--crt);font-size:16px;background:var(--ink);color:var(--text);border:2px solid var(--edge);padding:2px 8px;cursor:pointer;margin:2px 0}
+  .setuprow button:disabled{opacity:.5;cursor:wait}
+  .setuprow a{color:var(--cyan)}
+  .setupbilling{display:flex;gap:8px;align-items:baseline;margin:6px 0;font-size:17px}
+  .presetline{padding:5px 0;border-top:1px solid #2d2757;font-size:18px} .presetline.off{color:var(--dim)}
+  .presetline small{display:block;color:var(--dim);font-size:15px}
+  @media (max-width:900px){ .setuprow{grid-template-columns:1fr} }
+  #tidyList label.none{color:var(--dim)}
+  #tidyList input{accent-color:#6dff8e}
+  #tidyList small{color:var(--dim);font-size:15px;display:block}
+  #queueList .qjob button{font-family:var(--pixel);font-size:9px;background:transparent;color:#ff9a9a;border:1px solid #ff9a9a;padding:3px 6px;cursor:pointer}
+  .stopbtn.newbtn{color:var(--green);border-color:var(--green);background:var(--ink)}
+  .jobform textarea,.setgrid input:not([type]){font:inherit;font-size:20px;background:#0d0b1e;color:#fff;border:2px solid var(--edge);padding:6px;width:100%;resize:vertical}
+  .jobtask{display:flex;flex-direction:column;gap:4px;font-size:20px;margin:6px 0}
+  .jobwhere{display:flex;gap:6px 18px;flex-wrap:wrap;align-items:center;font-size:19px;margin:6px 0}
+  .jobwhere input{accent-color:#5ef2e6}
+  .setgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:8px 0}
+  .setgrid label{display:flex;flex-direction:column;gap:4px;font-size:20px}
+  .setgrid small{color:var(--dim);font-size:16px}
+  .setgrid select,.presetpick select{font:inherit;font-size:19px;background:#0d0b1e;color:#fff;border:2px solid var(--edge);padding:4px;max-width:100%}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .tab{font-family:var(--crt);font-size:18px;background:var(--ink);color:var(--dim);border:2px solid var(--edge);padding:3px 10px;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tab.on{color:#fff;border-color:var(--cyan)}
+  .tab .dot{display:inline-block;width:8px;height:8px;margin-right:6px;background:var(--dim)}
+  .tab .dot.live{background:var(--red);animation:blink 1s steps(2) infinite}
+  .tab .dot.ok{background:var(--green)} .tab .dot.bad{background:var(--red)} .tab .dot.wait{background:var(--gold);animation:blink .6s steps(2) infinite}
+  .stopbtn{font-family:var(--pixel);font-size:10px;background:#2a0e12;color:var(--red);border:2px solid var(--red);padding:7px 10px;cursor:pointer}
+  .hint{color:var(--dim);font-size:18px}
+  .hint a{color:var(--cyan)}
+
+  .screen{
+    position:relative;border:4px solid var(--edge);background:#000;
+    box-shadow:0 0 0 4px var(--bezel), 0 0 0 8px #0006, 0 20px 60px #000c, inset 0 0 40px #000;
+    aspect-ratio:16/9;width:100%;max-width:max(320px, calc((100vh - 100px - var(--below, 200px) - var(--trim, 0px)) * 16 / 9));margin:0 auto;overflow:hidden;
+  }
+  canvas{display:block;width:100%;height:100%;image-rendering:pixelated;image-rendering:crisp-edges}
+  .screen::after{ /* scanlines */
+    content:"";position:absolute;inset:0;pointer-events:none;
+    background:repeating-linear-gradient(0deg,#0000 0 2px,#0000002e 2px 4px);
+    mix-blend-mode:multiply;
+  }
+  .bubble{
+    position:absolute;transform:translate(-50%,-100%);font-family:var(--pixel);
+    font-size:clamp(6px,0.95vw,11px);line-height:1.3;white-space:nowrap;
+    background:#fff;color:#141024;padding:5px 7px;border:2px solid #141024;
+    box-shadow:3px 3px 0 #0008;pointer-events:none;z-index:3;
+    animation:pop .18s steps(3);
+  }
+  .bubble::after{content:"";position:absolute;left:50%;bottom:-7px;width:6px;height:6px;background:#fff;border-right:2px solid #141024;border-bottom:2px solid #141024;transform:translateX(-50%) rotate(45deg)}
+  .bubble.bad{background:#ffd6d6} .bubble.bad::after{background:#ffd6d6}
+  .bubble.ok{background:#d9ffe1} .bubble.ok::after{background:#d9ffe1}
+  @keyframes pop{from{transform:translate(-50%,-80%) scale(.4)}to{transform:translate(-50%,-100%) scale(1)}}
+  .banner{
+    position:absolute;left:50%;top:38%;transform:translate(-50%,-50%);z-index:4;
+    font-family:var(--pixel);font-size:clamp(18px,5vw,54px);letter-spacing:3px;
+    padding:.4em .7em;border:4px solid currentColor;background:#0d0b1ee6;
+    text-shadow:4px 4px 0 #000;animation:slam .5s steps(5);
+  }
+  .banner.ok{color:var(--green)} .banner.bad{color:var(--red)}
+  @keyframes slam{0%{transform:translate(-50%,-50%) scale(3);opacity:0}100%{transform:translate(-50%,-50%) scale(1);opacity:1}}
+
+  .panel{background:var(--ink);border:3px solid var(--edge);padding:12px 14px;min-width:0}
+  .label{font-family:var(--pixel);font-size:9px;color:var(--dim);margin-bottom:8px;letter-spacing:1px}
+  .task{font-size:22px;line-height:1.1;overflow-wrap:anywhere;max-height:3.4em;overflow:hidden}
+  .stats{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px}
+  .stat b{font-family:var(--pixel);font-size:14px;color:var(--gold);display:block;margin-top:4px}
+  .gates{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .gate{font-family:var(--pixel);font-size:9px;padding:8px 9px;border:2px solid var(--edge);color:var(--dim);background:#0d0b1e}
+  .gate.run{color:var(--gold);border-color:var(--gold);animation:blink .8s steps(2) infinite}
+  .gate.ok{color:var(--green);border-color:var(--green)}
+  .gate.bad{color:var(--red);border-color:var(--red)}
+  .gate.skip{opacity:.4;text-decoration:line-through}
+  .log{-webkit-mask-image:linear-gradient(transparent 0, #000 2.2em);mask-image:linear-gradient(transparent 0, #000 2.2em);font-size:19px;line-height:1.15;height:9.5em;overflow:hidden;color:#bfe9ff;white-space:pre-wrap;overflow-wrap:anywhere;display:flex;flex-direction:column;justify-content:flex-end}
+  .log div:last-child{color:#fff}
+  .log .g{color:var(--green)} .log .r{color:#ff9a9a} .log .y{color:var(--gold)}
+  .question{margin-top:16px;border:3px solid var(--gold);background:#2a2208;padding:12px 14px;animation:ring 1.2s steps(2) infinite}
+  .question .q{font-size:26px;color:#fff3c4;margin:4px 0 6px;overflow-wrap:anywhere}
+  .question .how{color:var(--dim)}
+  .answer{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
+  .answer input{flex:1;min-width:0;font:inherit;font-size:22px;background:#0d0b1e;color:#fff;border:2px solid var(--gold);padding:6px 10px}
+  .answer button{font-family:var(--pixel);font-size:10px;background:var(--gold);color:#141024;border:0;padding:8px 12px;cursor:pointer}
+  .answer button.quick{background:#2d2757;color:var(--gold);border:2px solid var(--gold)}
+  .result{margin-top:16px;border:3px solid var(--green);background:#0e2a18;padding:12px 14px}
+  .result.bad{border-color:var(--red);background:#2a0e12}
+  .result .q{font-size:24px;color:#fff;margin:4px 0 8px;overflow-wrap:anywhere}
+  .result .how{color:var(--dim);font-size:19px;white-space:pre-wrap;overflow-wrap:anywhere}
+  .result code{color:var(--cyan)}
+  .question code{color:var(--gold)}
+  @keyframes ring{50%{border-color:#ff4fa3}}
+  .banner.small{font-size:clamp(12px,2.6vw,26px);top:22%}
+  .tablewrap{overflow-x:auto}
+  #tokens{border-collapse:collapse;width:100%;font-size:18px}
+  #tokens th{font-family:var(--pixel);font-size:8px;color:var(--dim);text-align:right;padding:4px 6px;font-weight:normal}
+  #tokens th:first-child,#tokens td:first-child{text-align:left}
+  #tokens td{text-align:right;padding:3px 6px;border-top:1px solid #2d2757;white-space:nowrap}
+  #tokens td:first-child{max-width:320px;overflow:hidden;text-overflow:ellipsis}
+  #tokens{font-size:17px} #tokens td{padding:2px 8px}
+  #tokens tr.total td{color:var(--gold);border-top:2px solid var(--edge)}
+  .cast{display:flex;gap:4px 14px;flex-wrap:wrap;margin-top:8px;color:var(--dim);font-size:16px}
+  .cast span b{color:var(--text);font-weight:normal}
+</style>
+</head>
+<body>
+<div class="cab">
+  <header>
+    <h1>UNTIL IT WORKS<b>(HOP)</b></h1>
+    <span class="pill" id="pill"><i></i><span id="pillText">CONNECTING</span></span>
+    <button class="stopbtn newbtn" id="openJob">NEW JOB</button>
+    <button class="stopbtn setbtn" id="openQueue">QUEUE <span id="queueCount"></span></button>
+    <button class="stopbtn setbtn" id="openHistory">HISTORY</button>
+    <button class="stopbtn setbtn" id="openMemory">MEMORY</button>
+    <button class="stopbtn setbtn" id="openTidy">TIDY</button>
+    <button class="stopbtn setbtn" id="openSetup">SETUP</button>
+    <button class="stopbtn setbtn" id="openSettings">MODELS</button>
+    <button class="stopbtn" id="stopRun" hidden>STOP RUN</button>
+    <span class="spacer"></span>
+    <span class="hint" id="hint">live from ~/.mp-agent/runs · <a href="?demo=1">watch a demo</a></span>
+  </header>
+  <div class="layout">
+    <main class="left">
+    <div class="settings jobform" id="jobForm" hidden>
+    <div class="label">NEW JOB</div>
+    <label class="jobtask">What should the agents do?
+      <textarea id="jobTask" rows="3" placeholder="e.g. Stop the agency cancel route notifying the performer twice"></textarea></label>
+    <div class="jobwhere">
+      <span class="dim">Where?</span>
+      <label><input type="radio" name="jobKind" value="local" checked> a local project</label>
+      <label><input type="radio" name="jobKind" value="github"> a GitHub repo (pulls the latest)</label>
+      <label><input type="radio" name="jobKind" value="new"> a new project</label>
+      <label><input type="radio" name="jobKind" value="oneoff"> a one-off</label>
+    </div>
+    <div class="setgrid">
+      <label id="jobLocalWrap">Project<select id="jobLocal"><option>loading…</option></select></label>
+      <label id="jobGithubWrap" hidden>Repo<select id="jobGithub"><option>loading…</option></select></label>
+      <label id="jobNameWrap" hidden>Folder name <small>optional</small><input id="jobName" placeholder="my-new-thing"></label>
+      <label>Planner<select id="job-planner"></select></label>
+      <label>Workers<select id="job-worker"></select></label>
+      <label>Quick reviewer<select id="job-reviewer"></select></label>
+      <label>Panel<select id="job-panel"></select></label>
+      <label>Judge<select id="job-judge"></select></label>
+      <label>Spending cap $ <small>blank = your default</small><input id="jobCap" inputmode="decimal" placeholder="default"></label>
+    </div>
+    <div class="answer"><button type="button" id="startJob">START</button>
+      <button type="button" id="queueJob">ADD TO QUEUE</button>
+      <button type="button" class="quick" id="closeJob">CLOSE</button></div>
+    <div class="how" id="jobStatus">Everything happens on a separate branch; nothing is merged or pushed until you choose Keep.</div>
+  </div>
+
+  <div class="settings" id="changesPanel" hidden>
+    <div class="label">CHANGES <span class="dim" id="changesWhere"></span></div>
+    <div class="changesgrid">
+      <div class="filelist" id="changesFiles"></div>
+      <pre class="diff" id="changesDiff"></pre>
+    </div>
+    <details class="judgenotes" id="changesJudgeWrap"><summary>The final judge's notes</summary><pre id="changesJudge"></pre></details>
+    <div class="answer prrow" id="prRow">
+      <span class="dim">Open a pull request into</span>
+      <input id="prBase" placeholder="main">
+      <button type="button" id="openPr">OPEN PULL REQUEST</button>
+    </div>
+    <div class="answer"><button type="button" class="quick" data-close="changesPanel">CLOSE</button></div>
+    <div class="how" id="changesStatus"></div>
+  </div>
+
+  <div class="settings" id="queuePanel" hidden>
+    <div class="label">QUEUE <span class="dim">(jobs run one after another; add them from NEW JOB)</span></div>
+    <div id="queueList"></div>
+    <div class="label" style="margin-top:10px">RECENTLY STARTED FROM THE QUEUE</div>
+    <div id="queueHistory" class="dim"></div>
+    <div class="answer"><button type="button" class="quick" data-close="queuePanel">CLOSE</button></div>
+  </div>
+
+  <div class="settings" id="historyPanel" hidden>
+    <div class="label">HISTORY <span class="dim" id="historyTotals"></span></div>
+    <div class="histgrid">
+      <div><div class="label">BY PROJECT</div><div class="tablewrap"><table class="plain" id="historyProjects"></table></div></div>
+      <div><div class="label">WHO OBJECTS</div><div id="historyGates"></div></div>
+    </div>
+    <div class="label" style="margin-top:10px">RECENT RUNS <span class="dim">(click one to show it)</span></div>
+    <div class="tablewrap"><table class="plain clickable" id="historyRuns"></table></div>
+    <div class="answer"><button type="button" class="quick" data-close="historyPanel">CLOSE</button></div>
+  </div>
+
+  <div class="settings" id="memoryPanel" hidden>
+    <div class="label">PROJECT MEMORY <span class="dim">(what earlier runs settled; the planner reads it before planning)</span></div>
+    <div class="setgrid"><label>Project<select id="memoryProject"></select></label></div>
+    <textarea id="memoryText" rows="14" spellcheck="false"></textarea>
+    <div class="answer"><button type="button" id="saveMemory">SAVE</button>
+      <button type="button" class="quick" data-close="memoryPanel">CLOSE</button></div>
+    <div class="how" id="memoryStatus">Edit or delete anything that is wrong; the next run on that project uses what is here.</div>
+  </div>
+
+  <div class="settings" id="setupPanel" hidden>
+    <div class="label">SETUP <span class="dim">(what is installed and ready; nothing is installed or changed without you)</span></div>
+    <div class="setupready" id="setupReady">looking…</div>
+    <div class="setupsub">1 · Tools <span class="dim">each one signs in on its own; mp-agent finds its models</span></div>
+    <div id="setupTools"></div>
+    <div class="setupsub">2 · API keys <span class="dim" id="setupStore"></span></div>
+    <div id="setupKeys"></div>
+    <label class="setupbilling"><input type="checkbox" id="claudeBilling"> Pay for Claude Code with my Anthropic API key instead of a Claude subscription</label>
+    <div class="setupsub">3 · Choose a team <span class="dim">you can change each role later in MODELS</span></div>
+    <div id="setupPresets"></div>
+    <div class="answer"><button type="button" class="quick" id="setupRescan">SCAN AGAIN</button>
+      <button type="button" class="quick" data-close="setupPanel">CLOSE</button></div>
+    <div class="how" id="setupStatus"></div>
+  </div>
+
+  <div class="settings" id="tidyPanel" hidden>
+    <div class="label">TIDY UP <span class="dim">(only mp-agent's own leftovers; your projects and branches are never touched)</span></div>
+    <div id="tidyList"></div>
+    <div class="answer"><button type="button" id="sweep">SWEEP</button>
+      <button type="button" class="quick" data-close="tidyPanel">CLOSE</button></div>
+    <div class="how" id="tidyStatus"></div>
+  </div>
+
+  <div class="settings" id="settings" hidden>
+      <div class="label">MODELS FOR THE NEXT RUNS</div>
+      <label class="presetpick">Preset <small id="presetAbout">pick a ready-made team, or choose each role below</small><select id="set-preset"></select></label>
+      <div class="setgrid">
+        <label>Planner <small>plans the work and rules on disagreements</small><select id="set-planner"></select></label>
+        <label>Workers <small>do the work, many times over</small><select id="set-worker"></select></label>
+        <label>Quick reviewer <small>reads every change that passes its checks</small><select id="set-reviewer"></select></label>
+        <label>Panel <small>three lenses before the judge</small><select id="set-panel"></select></label>
+        <label>Judge <small>the final audit, the last word</small><select id="set-judge"></select></label>
+        <label>Spending cap per job <small>money billed to API keys, in $ (subscriptions aren't counted); blank = none</small><input id="set-cap" inputmode="decimal" placeholder="none"></label>
+      </div>
+      <div class="answer"><button type="button" id="saveSettings">SAVE AS DEFAULTS</button>
+        <button type="button" class="quick" id="closeSettings">CLOSE</button></div>
+      <div class="how" id="settingsStatus">The planner and judge can't be the workers' own model. To change them for one job only, use NEW JOB.</div>
+    </div>
+    <div class="tabs" id="tabs" hidden></div>
+    <div class="screen" id="stage">
+      <canvas id="scene" width="320" height="180"></canvas>
+    </div>
+    <div class="jobrow">
+      <div class="panel job">
+        <div class="label">CURRENT JOB</div>
+        <div class="task" id="task">Nobody is working. Start one with <code>mp-agent "task"</code> or <code>/agents</code> in Cline.</div>
+        <div class="stats">
+          <div class="stat">PASS<b id="pass">–</b></div>
+          <div class="stat">TIME<b id="time">–</b></div>
+          <div class="stat">DOING<b id="phase">asleep</b></div>
+        </div>
+        <div class="gates">
+          <span class="gate" id="g-check">CHECK</span>
+          <span class="gate" id="g-review">REVIEW</span>
+          <span class="gate" id="g-panel">PANEL</span>
+          <span class="gate" id="g-audit">AUDIT</span>
+        </div>
+        <div class="cast">
+          <span><b>The Builder</b> writes the code<i class="who" id="who-worker"></i></span>
+          <span><b>Checkbot</b> runs the checks</span>
+          <span><b>Red Pen</b> reviews<i class="who" id="who-reviewer"></i></span>
+          <span><b>The Interns</b> pre-audit (edges · truth · rehearsal)<i class="who" id="who-panel"></i></span>
+          <span><b>The Judge</b> plans and has the last word<i class="who" id="who-judge"></i></span>
+        </div>
+      </div>
+      <div class="panel tokens" id="tokensPanel" hidden>
+        <div class="label">TOKENS AND SPEND BY MODEL</div>
+        <div class="tablewrap"><table id="tokens"></table></div>
+      </div>
+    </div>
+    </main>
+    <aside class="right">
+    <div class="question" id="question" hidden>
+      <div class="label">WAITING FOR YOU</div>
+      <div class="q" id="qtext"></div>
+      <form class="answer" id="answerForm">
+        <input id="answerText" autocomplete="off" placeholder="type your answer…">
+        <button type="submit">SEND</button>
+        <button type="button" class="quick" data-answer="retry" id="quickRetry" hidden>RETRY</button>
+        <button type="button" class="quick" data-answer="stop" id="quickStop" hidden>STOP</button>
+      </form>
+      <div class="how" id="answerStatus">or in a terminal: <code>mp-agent answer "…"</code></div>
+    </div>
+    <div class="result" id="result" hidden>
+      <div class="label" id="resultLabel">FINISHED</div>
+      <div class="q" id="resultText"></div>
+      <div class="how" id="resultHow"></div>
+      <div class="answer" id="resultActions" hidden>
+        <button type="button" id="viewChangesBtn">VIEW CHANGES</button>
+        <button type="button" id="keepBtn">KEEP IT (MERGE)</button>
+        <button type="button" id="prBtn">KEEP AS PR…</button>
+        <button type="button" id="resumeBtn">RESUME</button>
+      <button type="button" id="openFolderBtn" hidden>OPEN FOLDER</button>
+        <button type="button" class="quick" id="discardBtn">DISCARD</button>
+      </div>
+      <div class="shots" id="resultShots" hidden></div>
+      <div class="how" id="resultStatus"></div>
+    </div>
+      <div class="panel logpanel">
+        <div class="label">RUN LOG</div>
+        <div class="log" id="log"></div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+"use strict";
+const W = 320, H = 180, FLOOR = 80;
+const cv = document.getElementById("scene"), ctx = cv.getContext("2d");
+const stage = document.getElementById("stage");
+const DEMO = new URLSearchParams(location.search).has("demo");
+const $ = (id) => document.getElementById(id);
+
+const px = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(Math.round(x), Math.round(y), w, h); };
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+// ---- tiny 3x5 pixel font for signs and screens --------------------------
+const GLYPH = {
+  A:"010101111101101",B:"110101110101110",C:"011100100100011",D:"110101101101110",E:"111100110100111",
+  F:"111100110100100",G:"011100101101011",H:"101101111101101",I:"111010010010111",K:"101101110101101",
+  L:"100100100100111",M:"101111111101101",N:"110101101101101",O:"010101101101010",P:"110101110100100",
+  R:"110101110101101",S:"011100010001110",T:"111010010010010",U:"101101101101111",W:"101101111111101",
+  Z:"111001010100111",J:"001001001101010",Q:"010101101110011",V:"101101101101010",X:"101101010101101",Y:"101101010010010","-":"000000111000000","?":"110001010000010","!":"010010010000010"," ":"000000000000000",
+  "0":"111101101101111","1":"010110010010111","2":"110001010100111","3":"110001010001110","4":"101101111001001",
+  "5":"111100110001110","6":"011100111101111","7":"111001010010010","8":"111101111101111","9":"111101111001110",
+};
+function text(str, x, y, c) {
+  for (const ch of str.toUpperCase()) {
+    const g = GLYPH[ch] || GLYPH[" "];
+    for (let i = 0; i < 15; i++) if (g[i] === "1") px(x + (i % 3), y + Math.floor(i / 3), 1, 1, c);
+    x += 4;
+  }
+}
+
+// ---- the cast ---------------------------------------------------------------
+const VISIT_SPOT = { docs: { x: 107, y: 90, dir: 1 }, browser: { x: 212, y: 90, dir: 1 }, files: { x: 32, y: 128, dir: -1 } };
+const SPOT = {
+  shelf:  { x: 32,  y: 128 },
+  desk:   { x: 82,  y: 127, dir: -1 },
+  rig:    { x: 104, y: 129, dir: 1 },
+  review: { x: 180, y: 127, dir: 1 },
+  bench:  { x: 278, y: 119, dir: -1 },
+  dock1:  { x: 244, y: 152, dir: 1 },
+  dock2:  { x: 226, y: 156, dir: 1 },
+  watch:  { x: 158, y: 146, dir: 1 },
+};
+function makeChar(id, name, home, pal, speed) {
+  return { id, name, pal, speed, home, x: home.x, y: home.y, tx: home.x, ty: home.y, dir: home.dir || 1,
+           anim: "sleep", moving: false, next: 0, bubble: null, glow: "#5ef2e6", gavelUp: 0, sweat: 0 };
+}
+const builder = makeChar("builder", "The Builder", { x: 92, y: 142 },
+  { skin: "#f2c9a0", body: "#c9d6e3", shade: "#8aa0b5", legs: "#8aa0b5", shoes: "#f4c542", eye: "#141024" }, 70);
+const checker = makeChar("checker", "Checkbot", { x: 132, y: 148 },
+  { skin: "#a9bcc6", body: "#4f7280", shade: "#35505b", legs: "#35505b", shoes: "#1e2a33", eye: "#5ef2e6" }, 34);
+const reviewer = makeChar("reviewer", "Red Pen", { x: 204, y: 144 },
+  { skin: "#e6b48a", body: "#a33b4f", shade: "#7a2638", legs: "#2e2a4a", shoes: "#141024", eye: "#141024" }, 36);
+const judge = makeChar("judge", "The Judge", SPOT.bench,
+  { skin: "#f0c8a4", body: "#1a1830", shade: "#0e0d1c", legs: "#1a1830", shoes: "#1a1830", eye: "#141024", robe: 1 }, 20);
+const INTERN_HELMET = { edges: "#5ef2e6", truth: "#ff4fa3", rehearsal: "#b07bf2" };
+const interns = ["edges", "truth", "rehearsal"].map((lens, i) => {
+  const c = makeChar("intern-" + lens, lens, { x: -14, y: 150 + i * 5 },
+    { skin: "#f2c9a0", body: "#dfe7ee", shade: "#9fb0c0", legs: "#9fb0c0", shoes: INTERN_HELMET[lens], eye: "#141024" }, 70);
+  c.intern = true; c.helmet = INTERN_HELMET[lens]; c.lens = lens;
+  c.jury = { x: 148 + i * 26, y: 160 - (i % 2) * 4, dir: 1 };
+  return c;
+});
+const cast = [builder, checker, reviewer, judge, ...interns];
+// Swarm workers: one mini builder per subtask, created from units.json.
+const SWARM_HELMETS = ["#f4c542", "#6dff8e", "#ff9a5e", "#5ec3f2", "#ff6fd0", "#c0f25e"];
+const swarmers = {};
+const NOT_SWARM = /^(main|final|tests|integrate-\d+)$/;
+function swarmWorker(id) {
+  if (!swarmers[id]) {
+    const i = Object.keys(swarmers).length;
+    const slot = { x: 24 + (i % 6) * 46, y: 172, dir: 1 };
+    const c = makeChar("swarm-" + id, id, { x: -14, y: slot.y },
+      { skin: "#f2c9a0", body: "#dfe7ee", shade: "#9fb0c0", legs: "#9fb0c0", shoes: SWARM_HELMETS[i % 6], eye: "#141024" }, 60);
+    c.intern = true; c.helmet = SWARM_HELMETS[i % 6]; c.slot = slot; c.unit = id; c.x = -14 - i * 10;
+    swarmers[id] = c;
+  }
+  return swarmers[id];
+}
+const everyone = () => [...cast, ...Object.values(swarmers), ...(typeof janitor !== "undefined" && janitor.active ? [janitor] : [])];
+function speaker(unit) { return unit && swarmers[unit] ? swarmers[unit] : builder; }
+
+// ---- scenery ----------------------------------------------------------------
+const stars = Array.from({ length: 22 }, () => ({ x: rnd(0, 46), y: rnd(0, 32), p: rnd(0, 6) }));
+const books = Array.from({ length: 18 }, (_, i) => ({ c: ["#e85d75","#5ec3f2","#f4c542","#7bdc7b","#b07bf2","#f2915e"][i % 6], h: 6 + (i * 7) % 3 }));
+let rigState = "idle", rigUntil = 0, monitorLines = Array.from({ length: 6 }, () => rnd(3, 16));
+
+function drawRoom(t, mode, phaseRole) {
+  // wall
+  px(0, 0, W, FLOOR, "#1b1838");
+  for (let x = 0; x < W; x += 20) px(x, 0, 1, FLOOR - 4, "#221e46");
+  px(0, FLOOR - 4, W, 4, "#2d2757");
+  // floor
+  for (let y = FLOOR; y < H; y += 10)
+    for (let x = 0; x < W; x += 16)
+      px(x, y, 16, 10, ((x / 16 + (y - FLOOR) / 10) % 2) ? "#2a2440" : "#241f39");
+  px(0, FLOOR, W, 2, "#15122b");
+
+  // window with moon and twinkling stars
+  const wx = 134, wy = 10;
+  px(wx - 3, wy - 3, 54, 42, "#3b3470");
+  px(wx, wy, 48, 36, "#0a1030");
+  for (const s of stars) if (Math.sin(t * 2 + s.p) > -0.3) px(wx + 1 + s.x, wy + 1 + s.y, 1, 1, "#fff");
+  px(wx + 34, wy + 6, 7, 7, "#fdf3c4"); px(wx + 36, wy + 5, 3, 1, "#fdf3c4"); px(wx + 32, wy + 8, 1, 3, "#fdf3c4");
+  px(wx + 37, wy + 8, 2, 2, "#e9dca0");
+  px(wx + 23, wy, 2, 36, "#3b3470"); px(wx, wy + 17, 48, 2, "#3b3470");
+
+  // neon sign
+  const flicker = Math.sin(t * 13) > -0.92;
+  // UNTIL IT / WORKS·HOP: the workshop that keeps going until it works
+  text("UNTIL IT", 22, 12, flicker ? "#ff4fa3" : "#5a2146");
+  text("WORKS", 22, 19, flicker ? "#5ef2e6" : "#1d4f4b");
+  text("HOP", 42, 19, flicker ? "#8a7fd0" : "#2b2650");
+  px(19, 9, 38, 1, "#3b3470"); px(19, 25, 38, 1, "#3b3470");
+
+  // bookshelf (the repository)
+  px(4, 34, 30, FLOOR + 26 - 34, "#4a3223");
+  px(6, 36, 26, FLOOR + 22 - 36, "#2c1d14");
+  for (let r = 0; r < 4; r++) {
+    const sy = 38 + r * 18;
+    px(6, sy + 13, 26, 2, "#4a3223");
+    for (let b = 0; b < 6; b++) { const bk = books[(r * 6 + b) % 18]; px(8 + b * 4, sy + 13 - bk.h - 1, 3, bk.h, bk.c); }
+  }
+  text("REPO", 12, 29, "#8c86b8");
+
+  // the builder's desk + monitor
+  px(40, 96, 24, 16, "#1c1c28"); px(42, 98, 20, 12, mode === "sleep" ? "#061510" : "#0b2a1e");
+  if (phaseRole === "builder") {
+    for (let i = 0; i < 5; i++) {
+      const w = monitorLines[(i + Math.floor(t * 6)) % monitorLines.length];
+      px(43 + (i % 2) * 2, 99 + i * 2, Math.min(w, 17), 1, i % 3 ? "#6dff8e" : "#5ef2e6");
+    }
+  } else if (mode !== "sleep") { if (Math.floor(t * 2) % 2) px(43, 99, 3, 1, "#6dff8e"); }
+  px(50, 112, 4, 2, "#1c1c28");
+  px(30, 114, 44, 3, "#7a5534"); px(30, 117, 44, 1, "#4f361f");
+  px(32, 118, 2, 12, "#4f361f"); px(70, 118, 2, 12, "#4f361f");
+  px(66, 111, 3, 3, "#e9e6ff"); px(67, 110, 1, 1, "#aaa"); // coffee
+
+  // test rig
+  const rx = 110;
+  px(rx, 82, 30, 50, "#3a4a57"); px(rx + 2, 84, 26, 46, "#2c3a45");
+  px(rx + 3, 86, 24, 12, "#081018");
+  let screenCol = "#5ef2e6", label = rigState === "pass" ? "PASS" : rigState === "fail" ? "FAIL" : rigState === "run" ? "TEST" : "IDLE";
+  if (rigState === "pass") screenCol = "#6dff8e"; else if (rigState === "fail") screenCol = "#ff5a5a";
+  if (rigState !== "run" || Math.floor(t * 4) % 2) text(label, rx + 7, 89, screenCol);
+  for (let i = 0; i < 5; i++) {
+    let c = "#223";
+    if (rigState === "run") c = (Math.floor(t * 10) % 5 === i) ? "#f4c542" : "#443";
+    else if (rigState === "pass") c = "#6dff8e"; else if (rigState === "fail") c = (Math.floor(t * 6) % 2) ? "#ff5a5a" : "#511";
+    px(rx + 4 + i * 5, 102, 3, 3, c);
+  }
+  for (let i = 0; i < 4; i++) px(rx + 5, 110 + i * 5, 20, 2, "#22303a");
+
+  // review desk + lamp
+  px(186, 114, 40, 3, "#7a5534"); px(186, 117, 40, 1, "#4f361f");
+  px(188, 118, 2, 12, "#4f361f"); px(222, 118, 2, 12, "#4f361f");
+  for (let i = 0; i < 4; i++) px(192 + i, 111 - i * 1, 12, 1, i % 2 ? "#ddd" : "#fff");
+  px(212, 100, 1, 14, "#555"); px(209, 99, 7, 3, "#f4c542");
+  if (phaseRole === "reviewer") { ctx.globalAlpha = 0.18; for (let i = 0; i < 12; i++) px(210 - i, 102 + i, 5 + i * 2, 1, "#fff3a0"); ctx.globalAlpha = 1; }
+}
+
+let phoneUntil = 0;
+function drawExtras(t, role) {
+  // the Architect's drafting board, next to the bench
+  px(214, 104, 20, 14, "#1d3f7a"); px(215, 105, 18, 12, "#2c5aa8");
+  for (let i = 0; i < 4; i++) px(217, 107 + i * 3, role === "planner" ? 4 + ((Math.floor(t * 3) + i) % 10) : 8 + i * 2, 1, "#cfe3ff");
+  px(216, 118, 1, 14, "#6b4a2f"); px(231, 118, 1, 14, "#6b4a2f");
+  // the phone rings while a run waits for a person
+  const ringing = S.live && (role === "waiting" || phoneUntil > t);
+  const wob = ringing ? (Math.floor(t * 16) % 2) : 0;
+  px(62 + wob, 40, 12, 8, "#2d2757"); px(64 + wob, 38, 8, 3, ringing ? "#ff4fa3" : "#4a4378"); px(65 + wob, 43, 6, 3, "#15122b");
+  if (ringing) { text("?", 78, 36 + (Math.floor(t * 4) % 2), "#f4c542"); if (Math.floor(t * 3) % 2) { px(58, 38, 2, 1, "#f4c542"); px(76, 38, 2, 1, "#f4c542"); } }
+  // the DOCS filing cabinet (Context7 lookups) and the WEB wall screen (the Playwright browser)
+  const docsOpen = everyone().some((c) => c.visit && c.visit.kind === "docs" && c.visit.until > t && !c.moving);
+  px(96, 50, 22, 32, "#6b7a88"); px(97, 51, 20, 30, "#56636f");
+  for (let d = 0; d < 3; d++) {
+    const dy = 53 + d * 9, open = docsOpen && d === 1;
+    px(98 + (open ? 3 : 0), dy, 18, 7, open ? "#7f8e9c" : "#65737f"); px(105 + (open ? 3 : 0), dy + 3, 4, 1, "#c9d3da");
+    if (open) { for (let f = 0; f < 4; f++) px(102 + f * 3, dy - 2, 2, 3, ["#fdf3c4", "#5ec3f2", "#ff9a9a", "#6dff8e"][f]); }
+  }
+  text("DOCS", 99, 44, docsOpen ? "#f4c542" : "#8c86b8");
+  const browsing = everyone().some((c) => c.visit && c.visit.kind === "browser" && c.visit.until > t && !c.moving);
+  px(190, 14, 44, 32, "#1c1c28"); px(192, 16, 40, 28, browsing ? "#e9eef5" : "#141a2a");
+  if (browsing) {
+    px(192, 16, 40, 5, "#9fb0c0"); px(194, 17, 3, 3, "#ff5a5a"); px(198, 18, 26, 1, "#ffffff");
+    const scroll = Math.floor(t * 4) % 6;
+    for (let i = 0; i < 5; i++) px(195, 23 + ((i * 4 + scroll) % 20), i % 2 ? 22 : 30, 1, i === 0 ? "#141024" : "#6b7a88");
+  }
+  px(210, 46, 4, 4, "#2d2757");
+  text("WEB", 206, 8, browsing ? "#5ef2e6" : "#8c86b8");
+  // swarm desks with their subtask labels
+  const list = Object.values(swarmers);
+  if (S.live && list.length) {
+    for (const c of list) {
+      const x = c.slot.x, y = c.slot.y;
+      px(x + 6, y - 12, 12, 2, "#7a5534"); px(x + 7, y - 10, 1, 8, "#4f361f"); px(x + 16, y - 10, 1, 8, "#4f361f");
+      px(x + 8, y - 19, 8, 7, "#1c1c28"); px(x + 9, y - 18, 6, 5, c.state === "approved" ? "#154a24" : "#0b2a1e");
+      if (c.state === "approved") px(x + 10, y - 16, 4, 1, "#6dff8e"); else if (Math.floor(t * 6 + x) % 2) px(x + 10, y - 17, 3, 1, "#6dff8e");
+      text(c.unit.slice(0, 6), x - 2, y + 2, c.helmet);
+    }
+  }
+}
+
+function drawBenchFront() {
+  px(252, 110, 52, 3, "#8a4b2e");
+  px(254, 113, 48, 26, "#5a2e1f");
+  px(256, 115, 44, 22, "#6b3826");
+  // scales of justice
+  px(277, 118, 1, 12, "#f4c542"); px(270, 120, 15, 1, "#f4c542");
+  px(269, 121, 4, 2, "#f4c542"); px(282, 121, 4, 2, "#f4c542"); px(274, 130, 7, 1, "#f4c542");
+}
+
+// ---- sprites -----------------------------------------------------------------
+function drawChar(c, t, alpha = 1) {
+  if (c.x < -8) return; // offstage
+  ctx.globalAlpha = alpha;
+  const P = c.pal, x = Math.round(c.x), d = c.dir;
+  const f = Math.floor(t * (c.moving ? (c.id === "builder" ? 16 : 8) : 4)) % 2;
+  const dance = c.anim === "dance";
+  const bob = dance ? Math.floor(t * 8 + x) % 2 : (c.anim === "work" && c.id !== "judge" ? Math.floor(t * 3) % 2 * 0 : 0);
+  const slump = c.anim === "slump" || c.anim === "sleep" ? 1 : 0;
+  const Y = Math.round(c.y) - (dance ? bob * 2 : 0);
+
+  ctx.globalAlpha = 0.35 * alpha; px(x - 5, Math.round(c.y), 10, 2, "#000"); ctx.globalAlpha = alpha;
+
+  // legs
+  if (!P.robe) {
+    const a = c.moving && f ? 1 : 0, b = c.moving && !f ? 1 : 0;
+    px(x - 3, Y - 4, 2, 4 - a, P.legs); px(x + 1, Y - 4, 2, 4 - b, P.legs);
+    px(x - 3, Y - 1 - a, 2, 1, P.shoes); px(x + 1, Y - 1 - b, 2, 1, P.shoes);
+  } else {
+    px(x - 4, Y - 4, 8, 4, P.body); px(x - 5, Y - 2, 10, 2, P.body);
+  }
+  // body
+  px(x - 4, Y - 10 + slump, 8, 6 - slump, P.body); px(x - 4, Y - 5, 8, 1, P.shade);
+  if (c.id === "judge") { px(x - 1, Y - 10, 2, 3, "#fff"); }
+  if (c.id === "checker") { px(x - 2, Y - 8, 4, 2, "#243640"); px(x - 1, Y - 8, 1, 1, Math.floor(t * 3) % 2 ? "#6dff8e" : "#f4c542"); }
+
+  // arms
+  if (dance) {
+    const up = Math.floor(t * 8) % 2;
+    px(x - 5, Y - 14 + up, 1, 4, P.body); px(x + 4, Y - 13 - up + 1, 1, 4, P.body);
+    px(x - 5, Y - 15 + up, 1, 1, P.skin); px(x + 4, Y - 14 - up + 1, 1, 1, P.skin);
+  } else if (c.anim === "work") {
+    const tap = Math.floor(t * (c.id === "builder" ? 14 : 5)) % 2;
+    const fx = d > 0 ? x + 4 : x - 6;
+    px(fx, Y - 8 + tap, 2, 1, P.body); px(d > 0 ? fx + 2 : fx - 1, Y - 8 + tap, 1, 1, P.skin);
+    px(d > 0 ? x - 5 : x + 4, Y - 10, 1, 5, P.body);
+  } else {
+    px(x - 5, Y - 10 + slump, 1, 5, P.body); px(x + 4, Y - 10 + slump, 1, 5, P.body);
+    px(x - 5, Y - 5 + slump, 1, 1, P.skin); px(x + 4, Y - 5 + slump, 1, 1, P.skin);
+  }
+
+  // head
+  const hy = Y - 16 + slump * 2;
+  px(x - 3, hy, 6, 6, P.skin);
+  const o = d > 0 ? 1 : 0;
+  const blink = (Math.floor(t * 10 + x) % 37) === 0;
+  if (c.anim === "sleep") { px(x - 2 + o, hy + 3, 2, 1, P.eye); px(x + 1 + o - 1, hy + 3, 2, 1, P.eye); }
+  else if (!blink) { px(x - 2 + o, hy + 2, 1, 1, P.eye); px(x + 1 + o, hy + 2, 1, 1, P.eye); }
+
+  // accessories
+  if (c.id === "builder" || c.intern) {
+    px(x - 3, hy - 2, 6, 2, c.helmet || "#f4c542"); px(x - 3, hy, 6, 1, c.helmet || "#d9a92a");
+    const flap = (c.moving || dance) ? f : 0;
+    px(x - 5, hy - 1 - flap, 2, 1, "#fff"); px(x - 6, hy - 2 - flap, 2, 1, "#fff");
+    px(x + 3, hy - 1 - flap, 2, 1, "#fff"); px(x + 4, hy - 2 - flap, 2, 1, "#fff");
+    if (c.moving && c.fast) {
+      ctx.globalAlpha = 0.6 * alpha;
+      for (let i = 0; i < 3; i++) px(x - d * (8 + i * 3), Y - 12 + i * 4, 4 + i, 1, "#9fe8ff");
+      ctx.globalAlpha = alpha;
+    }
+  } else if (c.id === "checker") {
+    px(x - 3, hy + 2, 6, 2, "#1e2a33");
+    const eye = c.glow;
+    px(x - 2 + o, hy + 2, 1, 1, eye); px(x + 1 + o - 1, hy + 2, 1, 1, eye);
+    px(x, hy - 3, 1, 3, "#777");
+    px(x, hy - 4, 1, 1, Math.floor(t * 2) % 2 ? eye : "#333");
+  } else if (c.id === "reviewer") {
+    px(x - 3, hy - 1, 6, 2, "#5a3a22"); px(x - 4, hy, 1, 4, "#5a3a22"); px(x + 3, hy, 1, 3, "#5a3a22");
+    if (c.anim !== "sleep") { px(x - 3 + o, hy + 2, 2, 1, "#e8f4ff"); px(x + o, hy + 2, 2, 1, "#e8f4ff"); px(x - 2 + o, hy + 2, 1, 1, P.eye); px(x + 1 + o, hy + 2, 1, 1, P.eye); }
+    if (c.anim === "work") px(d > 0 ? x + 6 : x - 7, Y - 11 + Math.floor(t * 6) % 2, 1, 3, "#ff3b3b");
+  } else if (c.id === "judge") {
+    px(x - 4, hy - 2, 8, 3, "#f1ede2"); px(x - 5, hy, 1, 5, "#f1ede2"); px(x + 4, hy, 1, 5, "#f1ede2");
+    px(x - 5, hy + 2, 1, 1, "#d8d2c2"); px(x + 4, hy + 3, 1, 1, "#d8d2c2");
+    const gx = x + d * 7;
+    if (c.gavelUp > t) { px(gx, hy - 3, 1, 6, "#8a5a2b"); px(gx - 2, hy - 5, 5, 3, "#6b3f1d"); }
+    else { px(gx - 1, Y - 8, 5, 2, "#6b3f1d"); px(gx + (d > 0 ? -3 : 4), Y - 7, 3, 1, "#8a5a2b"); }
+  }
+  if (c.anim === "sleep" && c.id !== "checker") {
+    const z = (t * 0.8 + x * 0.01) % 1;
+    ctx.globalAlpha = (1 - z) * alpha;
+    text("Z", x + 3 + z * 6, hy - 6 - z * 10, "#b8b2ff");
+    ctx.globalAlpha = alpha;
+  }
+  if (c.carry) { px(x - 3, hy - 7, 7, 5, "#b07b3b"); px(x - 3, hy - 5, 7, 1, "#7a5226"); }
+  if (c.id === "janitor") {
+    px(x - 4, hy - 2, 8, 2, "#e05a4f"); px(d > 0 ? x + 2 : x - 6, hy - 1, 4, 1, "#b8443b");      // cap and brim
+    px(x - 3, Y - 10, 1, 6, "#f4c542"); px(x + 2, Y - 10, 1, 6, "#f4c542");                     // overall straps
+    const swing = Math.floor(t * (c.moving || c.anim === "work" ? 10 : 2)) % 2;
+    const hx = x - d * 5, hy2 = Y - 9;                                                            // broom held behind, sweeping
+    for (let i = 0; i < 9; i++) px(hx - d * Math.round(i * 0.6) - d * swing, hy2 + i, 1, 1, "#8a5a2b");
+    px(hx - d * 6 - d * swing - 3, Y - 1, 7, 2, "#d9b25e"); px(hx - d * 6 - d * swing - 2, Y + 1, 5, 1, "#b08a3e");
+  }
+  if (c.sweat > t) px(x + (d > 0 ? -5 : 4), hy + Math.floor((t * 4) % 3), 1, 2, "#7fd4ff");
+  ctx.globalAlpha = 1;
+}
+
+// ---- particles ---------------------------------------------------------------
+let parts = [], shakeUntil = 0, rainUntil = 0;
+function confetti(n = 90) {
+  const cols = ["#ff4fa3", "#5ef2e6", "#f4c542", "#6dff8e", "#b07bf2", "#fff"];
+  for (let i = 0; i < n; i++) parts.push({ k: "c", x: rnd(0, W), y: rnd(-40, 0), vx: rnd(-10, 10), vy: rnd(20, 60), life: rnd(3, 6), c: cols[i % cols.length] });
+}
+function sparkle(x, y, c = "#6dff8e") { for (let i = 0; i < 14; i++) parts.push({ k: "s", x, y, vx: rnd(-30, 30), vy: rnd(-40, -5), life: rnd(0.5, 1), c }); }
+function throwPaper(from, to, c = "#fff") {
+  const T = 0.9, g = 160, tx = to.x, ty = to.y - 10;
+  parts.push({ k: "p", x: from.x, y: from.y - 10, vx: (tx - from.x) / T, vy: (ty - (from.y - 10)) / T - g * T / 2, g, life: T, c,
+               hit: to });
+}
+function stepParts(dt, t) {
+  for (const p of parts) {
+    p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.k === "p") p.vy += p.g * dt;
+    if (p.k === "s") p.vy += 60 * dt;
+    if (p.k === "c") p.vx += Math.sin(t * 3 + p.y) * 2 * dt;
+    if (p.k === "p" && p.life <= 0 && p.hit) { p.hit.sweat = t + 2; sparkle(p.hit.x, p.hit.y - 14, "#ffffff"); }
+  }
+  parts = parts.filter((p) => p.life > 0 && p.y < H + 10);
+  if (rainUntil > t && Math.random() < 0.7) parts.push({ k: "r", x: rnd(0, W), y: rnd(FLOOR - 30, FLOOR), vx: -8, vy: 140, life: 1.2 });
+}
+function drawParts(t) {
+  for (const p of parts) {
+    if (p.k === "c") px(p.x, p.y, 2, Math.floor(t * 8 + p.x) % 2 ? 1 : 2, p.c);
+    else if (p.k === "s") px(p.x, p.y, 1, 1, p.c);
+    else if (p.k === "p") { px(p.x - 1, p.y - 1, 3, 3, p.c); px(p.x, p.y, 1, 1, "#bbb"); }
+    else if (p.k === "r") px(p.x, p.y, 1, 3, "#6f8fd8");
+    else if (p.k === "dust") { ctx.globalAlpha = Math.max(0, Math.min(1, p.life)) * 0.7; px(p.x, p.y, 2, 2, "#b8b2d8"); ctx.globalAlpha = 1; }
+  }
+  if (rainUntil > t) { // storm cloud
+    for (let i = 0; i < 5; i++) px(120 + i * 16 + Math.sin(t + i) * 2, 52 + (i % 2) * 3, 22, 10, "#4b4f6e");
+    px(126, 60, 76, 6, "#3b3f5c");
+  }
+}
+
+// ---- bubbles and banner (HTML, so the text stays crisp) ----------------------
+function say(c, msg, kind = "", secs = 3) {
+  if (c.bubble) c.bubble.el.remove();
+  const el = document.createElement("div");
+  el.className = "bubble " + kind; el.textContent = msg;
+  stage.appendChild(el);
+  c.bubble = { el, until: performance.now() / 1000 + secs };
+}
+function placeBubbles(now) {
+  for (const c of everyone()) {
+    if (!c.bubble) continue;
+    if (now > c.bubble.until) { c.bubble.el.remove(); c.bubble = null; continue; }
+    c.bubble.el.style.left = (c.x / W * 100) + "%";
+    c.bubble.el.style.top = ((c.y - (c.id === "judge" ? 24 : 21)) / H * 100) + "%";
+  }
+}
+let bannerEl = null;
+function banner(msg, kind) {
+  if (bannerEl) bannerEl.remove();
+  bannerEl = document.createElement("div");
+  bannerEl.className = "banner " + kind; bannerEl.textContent = msg;
+  stage.appendChild(bannerEl);
+  setTimeout(() => { if (bannerEl) { bannerEl.remove(); bannerEl = null; } }, 7000);
+}
+
+// ---- reading the run ---------------------------------------------------------
+let S = { run: null, live: false, log: [], phase: "" };
+let seenRun = null, seen = 0, celebrateUntil = 0, finalKind = "";
+
+let lastActivity = 0;
+function actorSprite(role, unit) {
+  if (!role) return null;
+  if (role === "implementer") return speaker(unit && !NOT_SWARM.test(unit) ? unit : null);
+  if (role === "reviewer") return reviewer;
+  if (role.startsWith("panel:")) return interns.find((k) => k.lens === role.slice(6)) || interns[0];
+  if (role === "judge" || role === "planner") return judge;
+  return builder;
+}
+function processActivity(events, t) {
+  for (const e of events || []) {
+    if (!(e.ts > lastActivity)) continue;
+    lastActivity = e.ts;
+    const who = actorSprite(e.role, e.unit);
+    if (!who) continue;
+    const kind = e.category === "web" ? "browser" : e.category;
+    if (!VISIT_SPOT[kind]) continue;
+    if (kind === "files" && e.role !== "implementer") continue;
+    who.visit = { kind, spot: VISIT_SPOT[kind], until: t + (kind === "files" ? 3 : 7) };
+    const what = String(e.detail || "").replace(/^https?:\/\//, "").slice(0, 34);
+    if (kind === "docs") say(who, what ? `docs: ${what}` : "checking the docs", "", 4);
+    else if (kind === "browser") say(who, what ? `web: ${what}` : "checking the browser", "", 4);
+  }
+}
+
+function roleFor(phase) {
+  phase = (phase || "").replace(/^\[[^\]]+\] /, "");
+  if (/^planning/.test(phase)) return "planner";
+  if (/^waiting for you/.test(phase)) return "waiting";
+  if (/^merging/.test(phase)) return "merge";
+  if (/^wave /.test(phase)) return "swarm";
+  if (/implementing/.test(phase)) return "builder";
+  if (/check/.test(phase)) return "checker";
+  if (/fast review/.test(phase)) return "reviewer";
+  if (/pre-audit panel/.test(phase)) return "panel";
+  if (/audit/.test(phase)) return "judge";
+  return null;
+}
+
+function onLine(line, t) {
+  let m, unit = null;
+  const pm = line.match(/^\[([a-z0-9-]+)\] (.*)$/);
+  if (pm) { unit = pm[1]; line = pm[2]; if (!NOT_SWARM.test(unit)) swarmWorker(unit); }
+  const me = speaker(unit);
+  if (/provider trouble: /.test(line)) { say(me, "the provider is down!", "bad", 5); me.sweat = t + 5; return; }
+  if (/running it again/.test(line)) { say(reviewer, "sorry, one more go", "", 3); return; }
+  if (/^── planning with/.test(line)) { say(judge, "let me draw up a plan", "", 3); return; }
+  if ((m = line.match(/^\s*plan: (single|swarm)/))) { say(judge, m[1] === "swarm" ? "we swarm this one!" : "one job, one builder", "ok", 4); return; }
+  if (/^── wave 0/.test(line)) { banner("WAVE 0 · TESTS", "ok small"); say(builder, "tests first!", "", 3); return; }
+  if ((m = line.match(/^── wave (\d+)\/(\d+)/))) { banner(`WAVE ${m[1]}/${m[2]}`, "ok small"); return; }
+  if (/^── merging wave/.test(line)) { say(checker, "merge incoming!", "", 3); return; }
+  if ((m = line.match(/^\s*merged (\S+)/))) { sparkle(125, 100, "#f4c542"); return; }
+  if (/^── final gates/.test(line)) { say(judge, "now the whole thing", "", 3); return; }
+  if ((m = line.match(/^\s*frozen: /))) { say(checker, "tests frozen!", "ok", 3); return; }
+  if ((m = line.match(/ruling (A\d+): /))) { judge.gavelUp = t + 0.6; shakeUntil = t + 0.3; say(judge, `RULING ${m[1]}`, "ok", 4); return; }
+  if (/re-planned:/.test(line)) { say(judge, "new plan!", "ok", 3); return; }
+  if (/asking the planner/.test(line)) { say(me, "judge? help?", "", 3); return; }
+  if (/^\s*waiting for you: /.test(line)) { say(me, "we need a human!", "bad", 6); phoneUntil = t + 600; return; }
+  if (/^\s*you answered: /.test(line)) { say(me, "thanks, boss!", "ok", 3); phoneUntil = 0; return; }
+  if (/changed files it may not touch/.test(line)) { say(checker, "NOT YOUR FILE", "bad", 3); return; }
+  if ((m = line.match(/^\s*(\S+) approved after (\d+) pass/))) { if (unit && swarmers[unit]) say(swarmers[unit], "done!", "ok", 3); return; }
+  // The outcome lines mention the reviewer too, so they must be matched first.
+  if (/^approved:/.test(line)) {
+    judge.gavelUp = t + 0.6; shakeUntil = t + 0.4; say(judge, "APPROVED!", "ok", 5);
+    banner("APPROVED", "ok"); confetti(); celebrateUntil = t + 14; finalKind = "ok";
+  }
+  else if (/^NOT approved:/.test(line)) {
+    say(builder, "we'll get it next time", "bad", 5); banner("STOPPED", "bad"); rainUntil = t + 10; celebrateUntil = t + 10; finalKind = "bad";
+  }
+  else if (/pre-audit panel:/.test(line)) { say(builder, "send in the interns!", "", 2.5); }
+  else if ((m = line.match(/panel (\w+): approved/))) { const c = interns.find((k) => k.lens === m[1]); if (c) say(c, "looks good", "ok", 3); }
+  else if ((m = line.match(/panel (\w+): objected/))) { const c = interns.find((k) => k.lens === m[1]); if (c) { say(c, "found one!", "bad", 3); throwPaper(c, builder, INTERN_HELMET[m[1]]); } }
+  else if ((m = line.match(/panel (\w+): no verdict/))) { const c = interns.find((k) => k.lens === m[1]); if (c) say(c, "uhh...", "", 3); }
+  else if (/^\s*panel approved$/.test(line)) { say(interns[1], "go see the judge!", "ok", 3); }
+  else if (/reviewer changed files/.test(line)) { say(checker, "HANDS OFF THE CODE", "bad", 3); }
+  else if ((m = line.match(/── pass (\d+)/))) { say(me, m[1] === "1" ? "on it!" : `pass ${m[1]}!`, "", 2); rigState = "idle"; }
+  else if (/check exit 0/.test(line)) { rigState = "pass"; checker.glow = "#6dff8e"; say(checker, "PASS", "ok", 2.5); sparkle(125, 90); }
+  else if (/check exit [1-9]/.test(line)) { rigState = "fail"; checker.glow = "#ff5a5a"; say(checker, "FAIL!", "bad", 2.5); throwPaper(checker, me, "#ffd6d6"); setTimeout(() => say(me, "fixing...", "", 2), 1000); }
+  else if (/final reviewer asked for changes/.test(line)) {
+    judge.gavelUp = t + 0.6; shakeUntil = t + 0.5; say(judge, "OBJECTION!", "bad", 3);
+    setTimeout(() => say(builder, "gulp", "", 2), 800);
+  }
+  else if (/reviewer gave no verdict; asking again/.test(line)) { say(reviewer, "uhh... let me re-read", "", 3); }
+  else if (/auditor gave no verdict/.test(line)) { say(judge, "order! ...one moment", "", 4); }
+  else if (/reviewer asked for changes|no verdict line/.test(line)) { say(reviewer, "CHANGES!", "bad", 2.5); throwPaper(reviewer, me); }
+  else if (/reviewer approved/.test(line)) { say(reviewer, "LGTM!", "ok", 2.5); }
+  else if (/final review by/.test(line)) { say(judge, "hmm...", "", 3); }
+  else if (/rate limited/.test(line)) { say(builder, "rate limited... zzz", "", 6); builder.sweat = t + 6; }
+  else if (/no change since the last pass/.test(line)) { say(builder, "i'm stuck...", "bad", 3); builder.sweat = t + 3; }
+  else if (/provider error; retrying/.test(line)) { say(builder, "server hiccup, again!", "", 4); builder.sweat = performance.now() / 1000 + 4; }
+  else if (/could not be started/.test(line)) { say(builder, "where did my tool go?", "bad", 4); }
+}
+
+function gates(log) {
+  let g = { check: "", review: "", panel: "", audit: "" };
+  for (let l of log) {
+    l = l.replace(/^\[[^\]]+\] /, "");
+    if (/^approved:/.test(l)) g = { check: "ok", review: g.review ? "ok" : "skip", panel: g.panel ? "ok" : "skip", audit: g.audit ? "ok" : "skip" };
+    else if (/^NOT approved:/.test(l)) { for (const k in g) if (g[k] === "run") g[k] = "bad"; }
+    else if (/── pass/.test(l)) g = { check: "run", review: "", panel: "", audit: "" };
+    else if (/pre-audit panel:/.test(l)) g.panel = "run";
+    else if (/^\s*panel asked for changes/.test(l)) g.panel = "bad";
+    else if (/^\s*panel approved$/.test(l)) g.panel = "ok";
+    else if (/^\s*panel \w+: /.test(l)) { /* individual verdicts: shown as bubbles */ }
+    else if (/check exit 0/.test(l)) g.check = "ok";
+    else if (/check exit [1-9]/.test(l)) g.check = "bad";
+    else if (/final review by/.test(l)) g.audit = "run";
+    else if (/final reviewer asked/.test(l)) g.audit = "bad";
+    else if (/independent review/.test(l)) g.review = "run";
+    else if (/reviewer approved/.test(l)) g.review = "ok";
+    else if (/reviewer asked|no verdict line/.test(l)) g.review = "bad";
+  }
+  return g;
+}
+
+function fmtTime(s) { s = Math.max(0, s | 0); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
+function fmtTokens(n) { n = Number(n) || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n); }
+function shortModel(m) { return m.replace(/^[a-z]+\//, "").replace(/-\d{8}$/, ""); }
+function renderTokens() {
+  const usage = S.usage || {};
+  const models = Object.keys(usage).sort();
+  $("tokensPanel").hidden = !models.length;
+  if (!models.length) return;
+  const total = { calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0, usd: 0 };
+  let html = "<tr><th>model</th><th>calls</th><th>input</th><th>output</th><th>cache read</th><th>cache write</th><th>$ (API list price)</th></tr>";
+  for (const m of models) {
+    const u = usage[m];
+    for (const k of Object.keys(total)) total[k] += Number(u[k]) || 0;
+    const tip = `${m}: cache read ${fmtTokens(u.cache_read)}, cache write ${fmtTokens(u.cache_write)}`.replace(/"/g, "");
+    html += `<tr title="${tip}"><td>${shortModel(m).replace(/[<>&]/g, "")}</td><td>${u.calls || "–"}</td>` +
+            `<td>${fmtTokens(u.input)}</td><td>${fmtTokens(u.output)}</td><td>${fmtTokens(u.cache_read)}</td>` +
+            `<td>${fmtTokens(u.cache_write)}</td><td>$${(Number(u.usd) || 0).toFixed(3)}</td></tr>`;
+  }
+  if (models.length > 1) html += `<tr class="total"><td>total</td><td>${total.calls}</td><td>${fmtTokens(total.input)}</td><td>${fmtTokens(total.output)}</td>` +
+            `<td>${fmtTokens(total.cache_read)}</td><td>${fmtTokens(total.cache_write)}</td><td>$${total.usd.toFixed(3)}</td></tr>`;
+  $("tokens").innerHTML = html;
+}
+
+// a bigger window may not need the trim any more; measure again from scratch
+window.addEventListener("resize", () => document.documentElement.style.removeProperty("--trim"));
+
+function renderHud() {
+  renderTokens();
+  // who plays each part in this run (older runs did not record it)
+  for (const role of ["worker", "reviewer", "panel", "judge"]) {
+    const spec = (S.roles || {})[role] || "";
+    $("who-" + role).textContent = spec ? spec.split(":").slice(1).join(":") || spec : "";
+  }
+  requestAnimationFrame(() => {
+    // the scene gives up exactly the height the panels under it need
+    const below = document.querySelector(".jobrow");
+    if (below && window.innerWidth > 1180) document.documentElement.style.setProperty("--below", below.offsetHeight + "px");
+    // and whatever the page still overshoots by (a wrapped header, borders), so it never scrolls
+    const root = document.documentElement, over = root.scrollHeight - window.innerHeight;
+    if (window.innerWidth > 1180 && over > 1) {
+      root.style.setProperty("--trim", ((parseFloat(root.style.getPropertyValue("--trim")) || 0) + over) + "px");
+    }
+  });
+  $("stopRun").hidden = !(S.live && !DEMO);
+  const q = S.live && S.question && S.question.question;
+  $("question").hidden = !q;
+  if (q && $("qtext").textContent !== S.question.question) {
+    $("qtext").textContent = S.question.question;
+    $("answerStatus").innerHTML = 'or in a terminal: <code>mp-agent answer "…"</code>';
+    const retryable = /reply 'retry'/.test(S.question.question);
+    $("quickRetry").hidden = $("quickStop").hidden = !retryable;
+  }
+  const m = S.meta || {};
+  const finished = !S.live && S.run && m.outcome !== undefined;
+  $("result").hidden = !finished;
+  if (finished) {
+    $("result").className = "result" + (m.approved ? "" : " bad");
+    $("resultLabel").textContent = m.approved ? "DONE — APPROVED" : "STOPPED";
+    $("resultText").textContent = m.outcome;
+    const branch = m.branch || "", project = m.project || "";
+    const resolved = m.resolution && m.resolution.action;
+    const c = m.costs || {};
+    const billed = c.billed_usd ?? c.mercury_usd, covered = c.subscription_usd ?? c.claude_equiv_usd;
+    const costLine = billed === undefined ? "" : `\nCost: $${Number(billed).toFixed(3)} billed to API keys` +
+      (covered ? ` · $${Number(covered).toFixed(2)} API-equivalent on subscriptions (not billed)` : "");
+    let how;
+    if (resolved && m.oneoff && resolved === "kept") how = `Done. Your files are in ${project}`;
+    else if (resolved) how = `${resolved === "kept" ? "Kept" : "Discarded"}: ${m.resolution.detail}`;
+    else if (m.approved) how = `The work is on branch ${branch}\nin ${project}\n\nTo look first:  cd ${project} && git diff HEAD...${branch}`;
+    else how = `Everything it did is on branch ${branch} in ${project}.\nLogs: ${m.run || ""}`;
+    $("resultHow").textContent = how + costLine;
+    $("resultActions").hidden = DEMO || (!!resolved && !m.oneoff) || !branch;
+    $("openFolderBtn").hidden = !(m.oneoff && resolved === "kept");
+    if (m.oneoff && resolved === "kept") { $("keepBtn").hidden = true; $("discardBtn").hidden = true; $("resumeBtn").hidden = true; }
+    else $("discardBtn").hidden = false;
+    $("keepBtn").hidden = !m.approved || !!(m.oneoff && resolved === "kept");
+    $("prBtn").hidden = !m.approved || !!resolved;
+    $("viewChangesBtn").hidden = resolved === "discarded" || resolved === "kept";
+    const shots = m.screenshots || [];
+    $("resultShots").hidden = !shots.length;
+    if (shots.length && $("resultShots").dataset.run !== S.run) {
+      $("resultShots").dataset.run = S.run; $("resultShots").innerHTML = "";
+      for (const name of shots.slice(0, 8)) {
+        const url = `api/shot?run=${encodeURIComponent(S.run)}&name=${encodeURIComponent(name)}`;
+        const a = document.createElement("a"); a.href = url; a.target = "_blank"; a.title = "a screenshot the agents took while checking";
+        const img = document.createElement("img"); img.src = url; img.alt = name; a.appendChild(img); $("resultShots").appendChild(a);
+      }
+    }
+    $("resumeBtn").hidden = m.approved || !!m.resumed_as;
+    if (m.resumed_as) $("resultStatus").textContent = `resumed as ${m.resumed_as.split("/").pop()}`;
+  }
+  const pill = $("pill");
+  const last = S.log.filter(Boolean).slice(-1)[0] || "";
+  let kind = "", label = "IDLE";
+  if (!S.run) label = "NO RUNS YET";
+  else if (S.live) { kind = "live"; label = "LIVE"; }
+  else if (/^approved:/.test(last) || S.meta?.approved) { kind = "ok"; label = "LAST RUN APPROVED"; }
+  else { kind = "bad"; label = "LAST RUN STOPPED"; }
+  pill.className = "pill " + kind; $("pillText").textContent = (DEMO ? "DEMO · " : "") + label;
+  if (S.task) $("task").textContent = S.task;
+  const limit = (S.log.join("\n").match(/limits\s+(\d+) passes/) || [])[1];
+  $("pass").textContent = S.run ? `${S.passes || 0}${limit ? " / " + limit : ""}` : "–";
+  $("time").textContent = S.run ? fmtTime(S.elapsed) : "–";
+  const doing = S.phase.replace(/^\[[^\]]+\] /, "").replace(/^pass \d+: /, "").replace(/^waiting for you:.*/, "waiting for you");
+  $("phase").textContent = S.live ? ((doing.length > 34 ? doing.slice(0, 33) + "…" : doing) || "starting") : "asleep";
+  const g = gates(S.log);
+  for (const k of ["check", "review", "panel", "audit"]) $("g-" + k).className = "gate " + g[k];
+  const box = $("log");
+  const following = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const lines = S.log.filter((l) => l.trim()).slice(-400);
+  box.innerHTML = "";
+  for (const l of lines) {
+    const div = document.createElement("div"); div.textContent = l;
+    if (/exit 0|approved|wins/.test(l) && !/NOT/.test(l)) div.className = "g";
+    else if (/NOT approved|exit [1-9]|asked for changes|failed|stuck|rate limited/.test(l)) div.className = "r";
+    else if (/── pass|review|audit/.test(l)) div.className = "y";
+    box.appendChild(div);
+  }
+  if (following) box.scrollTop = box.scrollHeight;
+}
+
+function ingest(next, t) {
+  const newRun = next.run !== seenRun;
+  if (newRun) {
+    // A run that starts while the page is open plays from its first line;
+    // one that was already under way (or finished) when the page loaded
+    // does not replay its whole history as a burst of events.
+    seen = (seenRun !== null && next.live) ? 0 : (next.log || []).length;
+    // a run that starts while watching plays its lookups; one loaded mid-way does not replay old ones
+    lastActivity = (seenRun !== null && next.live) ? 0 : Math.max(0, ...((next.activity || []).map((e) => e.ts)));
+    seenRun = next.run; rigState = "idle";
+    for (const k of Object.keys(swarmers)) { if (swarmers[k].bubble) swarmers[k].bubble.el.remove(); delete swarmers[k]; }
+    if (!next.live && next.run) finalKind = next.meta?.approved ? "ok" : "bad";
+  }
+  S = { log: [], phase: "", ...next };
+  const log = S.log || [];
+  for (let i = seen; i < log.length; i++) onLine(log[i], t);
+  processActivity(S.activity, t);
+  seen = log.length;
+  if (/check/.test(S.phase)) rigState = "run";
+  for (const [id, u] of Object.entries(S.units || {})) if (!NOT_SWARM.test(id)) { const c = swarmWorker(id); c.state = u.state; c.uphase = u.phase || ""; }
+  renderHud();
+}
+
+// ---- deciding who goes where ----------------------------------------------------
+function goTo(c, spot, anim, fast = false) {
+  c.tx = spot.x; c.ty = spot.y; c.anim = anim; c.fast = fast; if (spot.dir) c.faceOnArrive = spot.dir;
+}
+function wander(c, t) {
+  if (t < c.next) return;
+  c.next = t + rnd(2.5, 6);
+  goTo(c, { x: c.home.x + rnd(-18, 18), y: c.home.y + rnd(-6, 8) }, "idle");
+}
+function decide(t) {
+  const role = S.live ? roleFor(S.phase) : null;
+  const party = celebrateUntil > t;
+  for (const c of cast) {
+    if (c.visit && c.visit.until > t) { goTo(c, c.visit.spot, "work", c.id === "builder"); continue; }
+    if (c.intern) {
+      if (party && finalKind === "ok" && c.x > 0) { c.anim = "dance"; c.tx = c.x; c.ty = c.y; continue; }
+      if (role === "panel") goTo(c, c.jury, "work", true);
+      else goTo(c, { x: -14, y: c.jury.y }, "idle", true);
+      continue;
+    }
+    if (party) {
+      if (finalKind === "ok") { c.anim = "dance"; c.tx = c.x; c.ty = c.y; }
+      else c.anim = "slump";
+      continue;
+    }
+    if (!S.live) {
+      if (c.id === "judge") { goTo(c, SPOT.bench, "sleep"); continue; }
+      goTo(c, c.home, "sleep"); continue;
+    }
+    if (c.id === "judge") {
+      if (role === "planner") goTo(c, { x: 232, y: 136, dir: -1 }, "work");
+      else goTo(c, SPOT.bench, role === "judge" ? "work" : role === "waiting" ? "idle" : "sleep");
+      continue;
+    }
+    if (c.id === "builder") {
+      if (role === "builder") {
+        if (t > c.next) {
+          c.next = t + rnd(4, 8);
+          c.reading = !c.reading && Math.random() < 0.55;
+        }
+        goTo(c, c.reading ? SPOT.shelf : SPOT.desk, c.reading ? "idle" : "work", true);
+      } else if (role === "judge") goTo(c, SPOT.dock1, "idle");
+      else if (role === "reviewer" || role === "panel") goTo(c, role === "panel" ? { x: 132, y: 138, dir: 1 } : SPOT.watch, "idle");
+      else { c.home = { x: 92, y: 142 }; wander(c, t); }
+      continue;
+    }
+    if (c.id === "checker") { if (role === "checker") goTo(c, SPOT.rig, "work"); else wander(c, t); continue; }
+    if (c.id === "reviewer") {
+      if (role === "reviewer") goTo(c, SPOT.review, "work");
+      else if (role === "judge") goTo(c, SPOT.dock2, "idle");
+      else wander(c, t);
+    }
+  }
+}
+function decideSwarm(t, role) {
+  const list = Object.values(swarmers);
+  const swarming = S.live && (role === "swarm" || role === "merge" || list.some((c) => c.state === "working"));
+  for (const c of list) {
+    if (c.visit && c.visit.until > t) { c.carry = false; goTo(c, c.visit.spot, "work", true); continue; }
+    if (celebrateUntil > t && finalKind === "ok" && c.x > 0) { c.anim = "dance"; c.tx = c.x; c.ty = c.y; c.carry = false; continue; }
+    if (!swarming) { c.carry = false; goTo(c, { x: -16, y: c.slot.y }, "idle", true); continue; }
+    if (role === "merge" && c.state === "approved") {
+      if (!c.delivered) {
+        c.carry = true; goTo(c, { x: 104 + (list.indexOf(c) % 3) * 6, y: 140 }, "idle");
+        if (Math.hypot(c.x - c.tx, c.y - c.ty) < 2) { c.carry = false; c.delivered = true; sparkle(c.x, c.y - 16, "#f4c542"); }
+      } else goTo(c, c.slot, "idle");
+      continue;
+    }
+    c.carry = false;
+    if (c.state === "approved") { c.delivered = c.delivered && role === "merge"; goTo(c, c.slot, "idle"); continue; }
+    goTo(c, c.slot, /implementing/.test(c.uphase || "") ? "work" : "idle", /implementing/.test(c.uphase || ""));
+  }
+}
+function move(c, dt) {
+  const dx = c.tx - c.x, dy = c.ty - c.y, dist = Math.hypot(dx, dy);
+  const sp = c.speed * (c.fast ? 2.2 : 1);
+  if (dist > 1) {
+    c.moving = true;
+    const k = Math.min(1, (sp * dt) / dist);
+    c.x += dx * k; c.y += dy * k;
+    if (Math.abs(dx) > 0.5) c.dir = dx > 0 ? 1 : -1;
+  } else {
+    c.moving = false;
+    if (c.faceOnArrive) c.dir = c.faceOnArrive;
+  }
+  if (c.moving && (c.anim === "work" || c.anim === "sleep")) { /* walking there first */ }
+}
+
+// ---- main loop ------------------------------------------------------------------
+let lastT = performance.now() / 1000, frames = 0;
+const DEBUG = new URLSearchParams(location.search).has("debug");
+function frame() {
+  // dt is capped so a tab returning from the background does not teleport
+  // everyone, but loosely enough that a slow frame rate still gets them there.
+  const now = performance.now() / 1000, dt = Math.min(0.25, now - lastT); lastT = now;
+  const t = now;
+  decide(t);
+  decideSwarm(t, S.live ? roleFor(S.phase) : null);
+  decideJanitor(t);
+  for (const c of everyone()) move(c, dt);
+  stepParts(dt, t);
+  if (Math.random() < 0.05) monitorLines[Math.floor(rnd(0, monitorLines.length))] = rnd(3, 17);
+
+  ctx.save();
+  if (shakeUntil > t) ctx.translate(Math.round(rnd(-2, 2)), Math.round(rnd(-2, 2)));
+  const role = S.live ? roleFor(S.phase) : null;
+  drawRoom(t, S.live ? "live" : "sleep", role);
+  drawExtras(t, role);
+  // the judge stands behind the bench, everyone else in depth order
+  drawChar(judge, t);
+  drawBenchFront();
+  const bodies = everyone().filter((c) => c !== judge).map((c) => ({ c, a: 1 }));
+  bodies.sort((a, b) => a.c.y - b.c.y);
+  for (const b of bodies) {
+    const c = b.c;
+    const shown = { ...c, anim: c.moving && c.anim !== "dance" ? "idle" : c.anim };
+    drawChar(shown, t, b.a);
+  }
+  drawParts(t);
+  if (!S.live && !(celebrateUntil > t) && !janitor.active) { ctx.globalAlpha = 0.25; px(0, 0, W, H, "#050418"); ctx.globalAlpha = 1; }
+  ctx.restore();
+  placeBubbles(now);
+  if (DEBUG) document.body.dataset.cast = everyone().map((c) => `${c.id}@${c.x | 0},${c.y | 0}:${c.anim}${c.carry ? "+box" : ""}`).join(" ") + ` frames=${++frames}`;
+  // headless browsers barely run rAF, so ?debug drives frames from a timer
+  if (DEBUG) setTimeout(frame, 33); else requestAnimationFrame(frame);
+}
+
+// ---- data sources -------------------------------------------------------------------
+const DEMO_SCRIPT = [
+  [0, "planning", ["task       Build a small CSV toolkit (demo)", "gates      check → quick review by inception/mercury-2.5 → panel of inception/mercury-2.5 → audit by claude:sonnet", "", "── planning with claude:sonnet"]],
+  [7, "wave 0: tests", ["   plan: swarm — three parts in two waves", "   done: reader, stats and cli all work", "   wave 1: reader, stats", "   wave 2: cli", "── wave 0: acceptance tests", "[tests] ── pass 1"], { tests: { state: "working", phase: "pass 1: implementing" } }],
+  [15, "[tests] pass 1: pre-audit panel", ["[tests]    no automated check for this unit", "[tests]    validation passed; independent review", "[tests]    reviewer approved", "[tests]    pre-audit panel: 3 lens(es), inception/mercury-2.5"], { tests: { state: "working", phase: "pass 1: pre-audit panel" } }],
+  [24, "wave 1/2: reader, stats", ["[tests]    panel edges: approved", "[tests]    panel truth: approved", "[tests]    panel rehearsal: approved", "[tests]    panel approved", "[tests]    tests approved after 1 pass(es)", "   frozen: tests/test_csvkit.py", "── wave 1/2: reader, stats", "[reader] ── pass 1", "[stats] ── pass 1"],
+    { tests: { state: "approved" }, reader: { state: "working", phase: "pass 1: implementing" }, stats: { state: "working", phase: "pass 1: implementing" } }],
+  [32, "[reader] pass 1: running check", ["[stats]    model 8s (exit 0)", "[stats]    check exit 1, 12 lines of output", "[stats] ── pass 2", "[reader]    model 9s (exit 0)"],
+    { tests: { state: "approved" }, reader: { state: "working", phase: "pass 1: running check" }, stats: { state: "working", phase: "pass 2: implementing" } }],
+  [40, "[stats] pass 2: fast review", ["[reader]    check exit 0, 3 lines of output", "[reader]    validation passed; independent review", "[reader]    reviewer approved", "[reader]    reader approved after 1 pass(es)", "[stats]    check exit 0, 3 lines of output", "[stats]    changed files it may not touch (reader.py); reverted", "[stats]    validation passed; independent review"],
+    { tests: { state: "approved" }, reader: { state: "approved" }, stats: { state: "working", phase: "pass 2: fast review" } }],
+  [48, "merging wave 1", ["[stats]    reviewer approved", "[stats]    stats approved after 2 pass(es)", "── merging wave 1", "   merged reader", "   merged stats", "   merged checks exit 0"],
+    { tests: { state: "approved" }, reader: { state: "approved" }, stats: { state: "approved" } }],
+  [56, "wave 2/2: cli", ["── wave 2/2: cli", "[cli] ── pass 1"], { tests: { state: "approved" }, reader: { state: "approved" }, stats: { state: "approved" }, cli: { state: "working", phase: "pass 1: implementing" } }],
+  [63, "waiting for you: Should the CLI print stats as JSON or a table?", ["[cli]    no progress: 3 passes in a row changed nothing", "[cli]    asking the planner for a ruling", "[cli]    the planner made no amendment", "[cli]    waiting for you: Should the CLI print stats as JSON or a table?"],
+    { tests: { state: "approved" }, reader: { state: "approved" }, stats: { state: "approved" }, cli: { state: "working", phase: "waiting" } }, { question: "Should the CLI print stats as JSON or a table?" }],
+  [73, "[cli] pass 5: implementing", ["[cli]    you answered: a table, please", "[cli]    recorded as A1", "[cli] ── pass 5"], { tests: { state: "approved" }, reader: { state: "approved" }, stats: { state: "approved" }, cli: { state: "working", phase: "pass 5: implementing" } }],
+  [81, "merging wave 2", ["[cli]    model 9s (exit 0)", "[cli]    check exit 0, 3 lines of output", "[cli]    reviewer approved", "[cli]    cli approved after 5 pass(es)", "── merging wave 2", "   merged cli", "   merged checks exit 0"],
+    { tests: { state: "approved" }, reader: { state: "approved" }, stats: { state: "approved" }, cli: { state: "approved" } }],
+  [88, "pass 1: pre-audit panel", ["── final gates on the merged work", "── pass 1", "   check exit 0, 9 lines of output", "   validation passed; independent review", "   reviewer approved", "   pre-audit panel: 3 lens(es), inception/mercury-2.5"], { tests: { state: "approved" }, reader: { state: "approved" }, stats: { state: "approved" }, cli: { state: "approved" }, final: { state: "working" } }],
+  [97, "pass 1: final audit (claude:sonnet)", ["   panel edges: approved", "   panel truth: approved", "   panel rehearsal: approved", "   panel approved", "   confident; final review by claude:sonnet"], { final: { state: "working" } }],
+  [107, "pass 2: implementing", ["   auditor 10s (exit 0)", "   final reviewer asked for changes", "   no progress: the reviewers keep disagreeing", "   ruling A2: empty CSV files print an empty table", "── pass 2"], { final: { state: "working" } }],
+  [114, "pass 2: final audit (claude:sonnet)", ["   model 6s (exit 0)", "   check exit 0, 9 lines of output", "   reviewer approved", "   panel approved", "   confident; final review by claude:sonnet"], { final: { state: "working" } }],
+  [123, "finished", ["   auditor 9s (exit 0)", "", "approved: checks pass, the reviewer and the panel approved, and claude:sonnet approved it"], {}],
+];
+const DEMO_LOOP = 142;
+const DEMO_ACTIVITY = [
+  [3, "planner", "plan", "docs", "python csv module"],
+  [17, "implementer", "tests", "docs", "unittest"],
+  [26, "implementer", "reader", "docs", "csv.DictReader"],
+  [34, "implementer", "stats", "files", "reader.py"],
+  [58, "implementer", "cli", "browser", "docs.python.org/3/library/argparse"],
+  [92, "panel:edges", "final", "docs", "statistics.median"],
+  [100, "judge", "final", "browser", "localhost:8000/report"],
+];
+let demoStart = performance.now() / 1000, demoCycle = 0;
+function demoState() {
+  let el = performance.now() / 1000 - demoStart;
+  if (el > DEMO_LOOP) { demoStart = performance.now() / 1000; demoCycle++; el = 0; }
+  const log = [], passes = [];
+  let phase = "";
+  const activity = DEMO_ACTIVITY.filter(([at]) => el >= at).map(([at, role, unit, category, detail]) =>
+    ({ ts: demoStart + at, role, unit, category, detail }));
+  let units = {}, question = null;
+  for (const [at, ph, lines, u, extra] of DEMO_SCRIPT) if (el >= at) { phase = ph; log.push(...lines); if (u) units = u; question = extra ? extra : null; }
+  const live = phase !== "finished";
+  return { run: "demo-" + demoCycle, live, task: "Build a small CSV toolkit: reader, stats and a CLI (demo)", units, question, activity,
+           phase: live ? phase : "finished", log, elapsed: Math.min(el, 123), passes: (log.join("\n").match(/── pass/g) || []).length,
+           meta: live ? {} : { approved: true } };
+}
+if (DEMO) { seenRun = "demo-start"; $("hint").innerHTML = 'scripted demo · <a href="./">back to live</a>'; }
+
+async function sendAnswer(text) {
+  text = (text || "").trim();
+  if (!text || DEMO) { if (DEMO) $("answerStatus").textContent = "(demo: answers are not sent)"; return; }
+  try {
+    const res = await fetch("api/answer", { method: "POST", headers: { "Content-Type": "application/json" },
+                                             body: JSON.stringify({ answer: text }) });
+    $("answerStatus").textContent = res.ok ? `sent: ${text}` : `not sent (${res.status}): ${await res.text()}`;
+    if (res.ok) $("answerText").value = "";
+  } catch (e) { $("answerStatus").textContent = "not sent: the visualizer server is not running"; }
+}
+async function act(kind) {
+  const post = (url) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+                                     body: JSON.stringify({ run: S.run }) });
+  try {
+    const d = await post("api/describe");
+    if (!d.ok) { $("resultStatus").textContent = await d.text(); return; }
+    const info = await d.json();
+    const question = kind === "keep"
+      ? `Merge ${info.branch} into ${info.into} in ${info.project}?\n(${info.change})`
+      : `Delete ${info.branch} and everything the agents did in this run?`;
+    if (!confirm(question)) return;
+    const res = await post(kind === "keep" ? "api/keep" : "api/discard");
+    $("resultStatus").textContent = res.ok ? (await res.json()).detail : `not done: ${await res.text()}`;
+  } catch (e) { $("resultStatus").textContent = "not done: the visualizer server is not running"; }
+}
+$("keepBtn").addEventListener("click", () => act("keep"));
+$("viewChangesBtn").addEventListener("click", () => showChanges(false));
+$("prBtn").addEventListener("click", () => showChanges(true));
+$("openFolderBtn").addEventListener("click", async () => {
+  try {
+    const res = await fetch("api/open-folder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run: S.run }) });
+    $("resultStatus").textContent = res.ok ? (await res.json()).detail : await res.text();
+  } catch (e) { $("resultStatus").textContent = "the visualizer server is not running"; }
+});
+$("resumeBtn").addEventListener("click", async () => {
+  $("resultStatus").textContent = "resuming…";
+  try {
+    const res = await fetch("api/resume", { method: "POST", headers: { "Content-Type": "application/json" },
+                                           body: JSON.stringify({ run: S.run }) });
+    $("resultStatus").textContent = res.ok ? (await res.json()).detail : `not resumed: ${await res.text()}`;
+    if (res.ok) selectedRun = null;
+  } catch (e) { $("resultStatus").textContent = "not resumed: the visualizer server is not running"; }
+});
+$("discardBtn").addEventListener("click", () => act("discard"));
+// ---- overlays over the scene: only one open at a time
+const OVERLAYS = ["jobForm", "settings", "changesPanel", "queuePanel", "historyPanel", "memoryPanel", "tidyPanel", "setupPanel"];
+function openOverlay(id) { for (const o of OVERLAYS) $(o).hidden = o !== id; }
+for (const b of document.querySelectorAll("[data-close]")) b.addEventListener("click", () => { $(b.dataset.close).hidden = true; });
+const postJSON = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+
+// ---- changes and pull requests
+let changesInfo = null;
+function renderDiff(file) {
+  const diff = changesInfo.diff || "";
+  let text = diff;
+  if (file) {
+    const parts = diff.split(/(?=^diff --git )/m);
+    text = parts.find((p) => p.startsWith(`diff --git a/${file} `)) || "";
+  }
+  const out = $("changesDiff"); out.innerHTML = "";
+  for (const line of text.split("\n")) {
+    const span = document.createElement("span");
+    span.className = line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") || line.startsWith("index ") ? "m"
+      : line.startsWith("@@") ? "h" : line.startsWith("+") ? "a" : line.startsWith("-") ? "d" : "";
+    span.textContent = line + "\n";
+    out.appendChild(span);
+  }
+  for (const b of $("changesFiles").children) b.classList.toggle("on", b.dataset.file === (file || ""));
+}
+async function showChanges(forPr) {
+  openOverlay("changesPanel");
+  $("changesStatus").textContent = "loading…"; $("changesDiff").textContent = ""; $("changesFiles").innerHTML = "";
+  const m = S.meta || {};
+  $("prRow").hidden = !(m.approved && !m.resolution);
+  $("prBase").value = m.base_branch || "main";
+  if (forPr) $("prBase").focus();
+  try {
+    const res = await postJSON("api/changes", { run: S.run });
+    if (!res.ok) { $("changesStatus").textContent = await res.text(); return; }
+    changesInfo = await res.json();
+    $("changesWhere").textContent = `${changesInfo.branch} vs ${changesInfo.base} · ${changesInfo.files.length} file(s)`;
+    const all = document.createElement("button"); all.textContent = "all files"; all.dataset.file = "";
+    all.onclick = () => renderDiff(null); $("changesFiles").appendChild(all);
+    for (const f of changesInfo.files) {
+      const b = document.createElement("button"); b.dataset.file = f.path; b.title = f.path;
+      b.innerHTML = `<span class="add">+${f.added}</span> <span class="del">-${f.removed}</span> `;
+      b.appendChild(document.createTextNode(f.path));
+      b.onclick = () => renderDiff(f.path); $("changesFiles").appendChild(b);
+    }
+    renderDiff(null);
+    $("changesJudge").textContent = changesInfo.judge || "(no judge notes for this run)";
+    $("changesStatus").textContent = changesInfo.truncated ? "the diff was long, so it is cut short here" : "";
+  } catch (e) { $("changesStatus").textContent = "could not load: the visualizer server is not running"; }
+}
+$("openPr").addEventListener("click", async () => {
+  const base = $("prBase").value.trim() || "main";
+  if (!confirm(`Push ${S.meta.branch} to GitHub and open a pull request into ${base}?\n\nThis is visible to anyone with access to the repository.`)) return;
+  $("changesStatus").textContent = "pushing and opening the pull request…";
+  try {
+    const res = await postJSON("api/pr", { run: S.run, base });
+    if (res.ok) {
+      const d = await res.json();
+      $("changesStatus").innerHTML = ""; const a = document.createElement("a");
+      a.href = d.url; a.target = "_blank"; a.textContent = `pull request opened: ${d.url}`; a.style.color = "var(--cyan)";
+      $("changesStatus").appendChild(a); $("prRow").hidden = true;
+    } else $("changesStatus").textContent = `not opened: ${await res.text()}`;
+  } catch (e) { $("changesStatus").textContent = "not opened: the visualizer server is not running"; }
+});
+
+// ---- queue
+async function refreshQueue(render) {
+  if (DEMO) return;
+  try {
+    const q = await (await fetch("api/queue", { cache: "no-store" })).json();
+    $("queueCount").textContent = q.jobs.length ? `(${q.jobs.length})` : "";
+    if (!render) return;
+    $("queueList").innerHTML = q.jobs.length ? "" : '<div class="dim">nothing waiting</div>';
+    q.jobs.forEach((j, i) => {
+      const row = document.createElement("div"); row.className = "qjob";
+      const x = document.createElement("button"); x.textContent = "REMOVE";
+      x.onclick = async () => { await postJSON("api/queue/remove", { id: j.id }); refreshQueue(true); };
+      const label = document.createElement("span"); label.textContent = `${i + 1}. ${j.label}  —  ${j.args.join(" ")}`;
+      row.append(x, label); $("queueList").appendChild(row);
+    });
+    $("queueHistory").style.whiteSpace = "pre-wrap";
+    $("queueHistory").textContent = q.history.slice(-6).reverse().map((h) => `${h.label} → ${h.outcome}`).join("\n") || "none yet";
+  } catch (e) { /* the state poll reports a dead server */ }
+}
+setInterval(() => refreshQueue(!$("queuePanel").hidden), 5000);
+refreshQueue(false);
+$("openQueue").addEventListener("click", () => { openOverlay("queuePanel"); refreshQueue(true); });
+
+// ---- history
+$("openHistory").addEventListener("click", async () => {
+  openOverlay("historyPanel");
+  $("historyTotals").textContent = "loading…";
+  try {
+    const h = await (await fetch("api/history", { cache: "no-store" })).json();
+    const t = h.totals;
+    $("historyTotals").textContent = `${t.runs} runs · ${t.approved} approved · ${t.hours} hours · $${t.billed_usd.toFixed(2)} billed`;
+    const esc = (v) => String(v ?? "").replace(/[<>&"]/g, "");
+    $("historyProjects").innerHTML = "<tr><th>project</th><th>runs</th><th>approved</th><th>minutes</th><th>billed $</th></tr>" +
+      h.projects.map((p) => `<tr><td>${esc(p.project)}</td><td>${p.runs}</td><td>${p.approved}</td><td>${Math.round(p.seconds / 60)}</td><td>${p.billed_usd.toFixed(3)}</td></tr>`).join("");
+    const g = h.gates, max = Math.max(1, ...Object.values(g));
+    const bar = (label, n, note) => `<div class="bar"><i style="width:${Math.round(160 * n / max)}px"></i>${n} ${label}${note ? ` <span class="dim">${esc(note)}</span>` : ""}</div>`;
+    $("historyGates").innerHTML = bar("failed checks", g.check_failures) + bar("reviewer objections", g.review_objections) +
+      bar("panel objections", g.panel_objections, Object.entries(h.lenses).map(([k, v]) => `${k} ${v}`).join(" · ")) +
+      bar("judge objections", g.judge_objections, `${g.judge_after_panel} after the panel had approved (what the panel missed)`) +
+      bar("rulings", g.rulings) + bar("questions for you", g.questions);
+    $("historyRuns").innerHTML = "<tr><th>when</th><th>project</th><th>task</th><th>result</th><th>passes</th><th>min</th><th>$</th></tr>" +
+      h.runs.slice(0, 40).map((r) => `<tr data-run="${esc(r.run)}"><td>${esc(r.run.slice(4, 6))}/${esc(r.run.slice(6, 8))} ${esc(r.run.slice(9, 11))}:${esc(r.run.slice(11, 13))}</td><td>${esc(r.project)}</td>` +
+        `<td>${esc(r.task)}</td><td>${r.approved ? "approved" : "stopped"}${r.resolution ? " · " + esc(r.resolution) : ""}</td>` +
+        `<td>${r.passes}</td><td>${Math.round(r.seconds / 60)}</td><td>${r.billed_usd.toFixed(3)}</td></tr>`).join("");
+    for (const tr of $("historyRuns").querySelectorAll("tr[data-run]"))
+      tr.onclick = () => { selectedRun = tr.dataset.run; $("historyPanel").hidden = true; refreshTabs(); };
+  } catch (e) { $("historyTotals").textContent = "could not load: the visualizer server is not running"; }
+});
+
+// ---- project memory
+async function loadMemory(id) {
+  const res = await fetch("api/memory" + (id ? `?id=${encodeURIComponent(id)}` : ""), { cache: "no-store" });
+  return res.ok ? res.json() : { projects: [] };
+}
+$("openMemory").addEventListener("click", async () => {
+  openOverlay("memoryPanel");
+  const data = await loadMemory();
+  $("memoryProject").innerHTML = "";
+  for (const p of data.projects) {
+    const o = document.createElement("option"); o.value = p.id; o.textContent = p.project; $("memoryProject").appendChild(o);
+  }
+  if (!data.projects.length) {
+    $("memoryText").value = "";
+    $("memoryStatus").textContent = "No project has a memory yet: one is written when a run settles something (a ruling or your answer).";
+    return;
+  }
+  $("memoryText").value = (await loadMemory(data.projects[0].id)).text || "";
+});
+$("memoryProject").addEventListener("change", async () => { $("memoryText").value = (await loadMemory($("memoryProject").value)).text || ""; });
+$("saveMemory").addEventListener("click", async () => {
+  const res = await postJSON("api/memory/save", { id: $("memoryProject").value, text: $("memoryText").value });
+  $("memoryStatus").textContent = res.ok ? "saved: the next run on this project plans with this" : await res.text();
+});
+
+function jobBody() {
+  const kind = jobKind();
+  return { task: $("jobTask").value, kind, name: $("jobName").value, max_usd: $("jobCap").value.trim(),
+           value: kind === "local" ? $("jobLocal").value : kind === "github" ? $("jobGithub").value : "",
+           ...Object.fromEntries(ROLE_NAMES.map((role) => [role, $("job-" + role).value])) };
+}
+
+// ---- tidy up, with a janitor
+const janitor = makeChar("janitor", "Sweepy", { x: 340, y: 152 },
+  { skin: "#e8b88f", body: "#3f6fd6", shade: "#2b4c9c", legs: "#2b4c9c", shoes: "#3a2a1a", eye: "#141024" }, 46);
+janitor.active = false; janitor.route = [];
+const TIDY_WORDS = { worktrees: "sweeping up old worktrees", shots: "binning stray screenshots",
+                     queue_history: "wiping the queue board", start_log: "emptying the log bin",
+                     memories: "clearing out old memories", orphan_runs: "boxing up old runs", all_runs: "archiving the run history" };
+function sendJanitor(doneIds) {
+  const t = performance.now() / 1000;
+  const stops = [{ x: 262, y: 150 }, { x: 196, y: 158 }, { x: 128, y: 146 }, { x: 70, y: 156 }];
+  const lines = doneIds.length ? doneIds.map((id) => TIDY_WORDS[id] || "tidying") : ["already spotless!"];
+  janitor.active = true; janitor.x = 336; janitor.y = 152; janitor.dir = -1;
+  janitor.route = lines.map((line, i) => ({ ...stops[i % stops.length], line }));
+  janitor.route.push({ x: 40, y: 152, line: "all tidy!", final: true }, { x: -24, y: 152, exit: true });
+  janitor.pauseUntil = 0; janitor.said = -1; janitor.started = t;
+}
+function decideJanitor(t) {
+  if (!janitor.active) return;
+  const stop = janitor.route[0];
+  if (!stop) { janitor.active = false; return; }
+  if (janitor.pauseUntil > t) { janitor.anim = "work"; janitor.tx = janitor.x; janitor.ty = janitor.y; return; }
+  janitor.tx = stop.x; janitor.ty = stop.y; janitor.anim = "idle";
+  if (Math.hypot(janitor.x - stop.x, janitor.y - stop.y) < 2) {
+    janitor.route.shift();
+    if (stop.exit) { janitor.active = false; if (janitor.bubble) { janitor.bubble.el.remove(); janitor.bubble = null; } return; }
+    say(janitor, stop.line, stop.final ? "ok" : "", stop.final ? 2.5 : 2.2);
+    janitor.pauseUntil = t + (stop.final ? 1.6 : 1.8);
+    for (let i = 0; i < 10; i++) parts.push({ k: "dust", x: janitor.x - 6 + rnd(-4, 4), y: janitor.y - 1, vx: rnd(-18, 18), vy: rnd(-14, -2), life: rnd(0.5, 1.1) });
+    if (stop.final) confetti(24);
+  } else if (Math.random() < 0.5) {
+    parts.push({ k: "dust", x: janitor.x - janitor.dir * 7, y: janitor.y - 1, vx: rnd(-6, 6) - janitor.dir * 10, vy: rnd(-10, -2), life: rnd(0.4, 0.8) });
+  }
+}
+async function loadTidy() {
+  $("tidyStatus").textContent = "";
+  const plan = await (await fetch("api/tidy", { cache: "no-store" })).json();
+  $("tidyList").innerHTML = "";
+  for (const item of plan.items) {
+    const label = document.createElement("label");
+    if (!item.count) label.className = "none";
+    const box = document.createElement("input"); box.type = "checkbox"; box.value = item.id;
+    box.checked = item.count > 0 && !item.optional; box.disabled = !item.count;
+    const text = document.createElement("span");
+    text.textContent = `${item.count} · ${item.label}`;
+    if (item.details && item.details.length) {
+      const small = document.createElement("small");
+      small.textContent = item.details.slice(0, 4).join(" · ") + (item.details.length > 4 ? ` · +${item.details.length - 4} more` : "");
+      text.appendChild(small);
+    }
+    label.append(box, text); $("tidyList").appendChild(label);
+  }
+  if (plan.live && plan.live.length) $("tidyStatus").textContent = "Runs that are still going are left alone.";
+}
+$("openTidy").addEventListener("click", () => { openOverlay("tidyPanel"); loadTidy(); });
+$("sweep").addEventListener("click", async () => {
+  const items = [...$("tidyList").querySelectorAll("input:checked")].map((b) => b.value);
+  $("tidyPanel").hidden = true;
+  try {
+    const res = await postJSON("api/tidy", { items });
+    const done = (await res.json()).done || {};
+    sendJanitor(Object.keys(done));
+    $("tidyStatus").textContent = Object.entries(done).map(([k, v]) => `${k}: ${v}`).join(" · ") || "nothing needed tidying";
+  } catch (e) { sendJanitor([]); }
+});
+
+// ---- SETUP: tools, API keys, a team ------------------------------------------------------
+let setupInfo = null;
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") node.className = v; else if (k === "text") node.textContent = v; else node.setAttribute(k, v);
+  }
+  for (const c of children) if (c) node.append(c);
+  return node;
+}
+async function loadSetup(quiet) {
+  if (!quiet) $("setupReady").textContent = "looking at what is installed…";
+  try {
+    setupInfo = await (await fetch("api/setup", { cache: "no-store" })).json();
+  } catch (e) { $("setupReady").textContent = "could not look: the visualizer server is not running"; return null; }
+  renderSetup();
+  return setupInfo;
+}
+function renderSetup() {
+  const info = setupInfo;
+  $("setupReady").className = "setupready " + (info.ready ? "ok" : "bad");
+  $("setupReady").textContent = info.ready ? "Ready: " + info.ready_detail + "." : "Not ready yet: " + info.ready_detail + ".";
+  // tools
+  const tools = $("setupTools"); tools.innerHTML = "";
+  for (const t of info.tools) {
+    const state = t.ready ? ["ready", "READY"] : t.installed ? ["half", "NOT SET UP"] : ["none", "NOT INSTALLED"];
+    const what = el("div", {}, el("span", { text: t.ready ? `${t.models} model(s)` : t.installed ? "installed, but no models yet" : "" }),
+      el("small", { text: "paid through " + t.pays }));
+    if (t.problem) what.append(el("small", { text: "⚠ " + t.problem }));
+    if (!t.installed) what.append(el("small", {}, "install: ", el("code", { text: t.install })));
+    else if (!t.ready) what.append(el("small", {}, "set up: ", el("code", { text: t.login })));
+    const first = (info.available || []).find((o) => o.spec.split(":")[0] === t.id);
+    const result = el("span", { class: "testresult" });
+    let action = null;
+    if (first) {
+      action = el("button", { type: "button", text: "TEST" });
+      action.title = "one tiny call to " + first.label;
+      action.addEventListener("click", () => testModel(first.spec, action, result));
+    }
+    what.append(result);
+    tools.append(el("div", { class: "setuprow" }, el("b", { text: t.name }), el("span", { class: "badge " + state[0], text: state[1] }), what, action));
+  }
+  // keys
+  $("setupStore").textContent = "kept in " + info.keys.store + "; a key is never shown again, only its last four characters";
+  const keysBox = $("setupKeys"); keysBox.innerHTML = "";
+  for (const k of info.keys.providers) {
+    const input = el("input", { type: "password", autocomplete: "off", spellcheck: "false", placeholder: k.stored ? "paste a new key to replace it" : "paste the key" });
+    const save = el("button", { type: "button", text: "SAVE" });
+    const status = el("span", { class: "testresult" });
+    save.addEventListener("click", async () => {
+      if (!input.value.trim()) { status.className = "testtestresult bad"; status.textContent = "paste the key first"; return; }
+      save.disabled = true;
+      try {
+        const res = await postJSON("api/keys/set", { provider: k.id, key: input.value });
+        input.value = "";                                   // never keep it in the page
+        status.className = "testresult " + (res.ok ? "ok" : "bad");
+        status.textContent = res.ok ? (await res.json()).detail : await res.text();
+        if (res.ok) setTimeout(() => loadSetup(true), 600);
+      } catch (e) { status.className = "testtestresult bad"; status.textContent = "not saved: the visualizer server is not running"; }
+      save.disabled = false;
+    });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") save.click(); });
+    const buttons = el("div", {}, save);
+    if (k.stored) {
+      const remove = el("button", { type: "button", text: "REMOVE" });
+      remove.addEventListener("click", async () => {
+        remove.disabled = true;
+        const res = await postJSON("api/keys/remove", { provider: k.id });
+        status.className = "testresult " + (res.ok ? "ok" : "bad");
+        status.textContent = res.ok ? "removed" : await res.text();
+        setTimeout(() => loadSetup(true), 600);
+      });
+      buttons.append(remove);
+    }
+    const state = k.stored ? ["ready", `STORED …${k.last4}`] : k.in_environment ? ["half", "IN YOUR ENVIRONMENT"] : ["none", "NOT SET"];
+    const link = el("a", { href: k.url, target: "_blank", rel: "noopener noreferrer", text: "get a key" });
+    keysBox.append(el("div", { class: "setuprow" }, el("b", { text: k.name }), el("span", { class: "badge " + state[0], text: state[1] }),
+      el("div", {}, el("small", { text: `for ${k.for} · ${k.env}` }), el("small", {}, link), input, status), buttons));
+  }
+  $("claudeBilling").checked = info.claude_billing === "api";
+  // presets
+  const presets = $("setupPresets"); presets.innerHTML = "";
+  for (const p of info.presets) {
+    const line = el("div", { class: "presetline" + (p.roles ? "" : " off") });
+    if (p.roles) {
+      const same = ["planner", "worker", "reviewer", "panel", "judge"].every((r) => (p.roles[r] || "") === (info.chosen[r] || ""));
+      const use = el("button", { type: "button", class: "presetbtn", text: info.preset === p.id || same ? "IN USE" : "USE THIS TEAM" });
+      use.addEventListener("click", async () => {
+        const res = await postJSON("api/settings", { preset: p.id });
+        $("setupStatus").textContent = res.ok ? `${p.name} is now the default team.` : `not changed: ${await res.text()}`;
+        loadSetup(true);
+      });
+      line.append(use, " ");
+    }
+    line.append(el("b", { text: p.name }), el("small", { text: p.about }));
+    if (p.roles) line.append(el("small", { text: ["planner", "worker", "reviewer", "panel", "judge"].map((r) => `${r} ${p.roles[r] || "same as workers"}`).join(" · ") }));
+    else line.append(el("small", { text: "needs " + p.missing.join(" and ") }));
+    presets.append(line);
+  }
+}
+async function testModel(spec, button, result) {
+  button.disabled = true;
+  result.className = "testresult"; result.textContent = "testing " + spec + "…";
+  try {
+    const r = await (await postJSON("api/setup/test", { model: spec })).json();
+    result.className = "testresult " + (r.ok ? "ok" : "bad");
+    result.textContent = r.ok ? `${spec} works (${r.seconds}s)` : `${spec}: ${r.problem}`;
+  } catch (e) { result.className = "testtestresult bad"; result.textContent = "could not test: the visualizer server is not running"; }
+  button.disabled = false;
+}
+$("openSetup").addEventListener("click", () => { openOverlay("setupPanel"); loadSetup(); });
+$("setupRescan").addEventListener("click", () => loadSetup());
+$("claudeBilling").addEventListener("change", async () => {
+  const res = await postJSON("api/settings", { claude_billing: $("claudeBilling").checked ? "api" : "subscription" });
+  $("setupStatus").textContent = res.ok ? ($("claudeBilling").checked ? "Claude Code will be paid for with your Anthropic API key." : "Claude Code will use your Claude subscription.") : `not changed: ${await res.text()}`;
+  loadSetup(true);
+});
+// A first visit (no settings saved yet), or models that are no longer there: start at SETUP.
+if (!DEMO) setTimeout(async () => {
+  try {
+    const info = await (await fetch("api/setup", { cache: "no-store" })).json();
+    if (info.first_time || !info.ready) { setupInfo = info; openOverlay("setupPanel"); renderSetup(); }
+  } catch (e) { /* the server is not up; the page says so elsewhere */ }
+}, 1200);
+
+let whereInfo = null;
+function jobKind() { return document.querySelector('input[name="jobKind"]:checked').value; }
+function showJobKind() {
+  const k = jobKind();
+  $("jobLocalWrap").hidden = k !== "local";
+  $("jobGithubWrap").hidden = k !== "github";
+  $("jobNameWrap").hidden = !(k === "new" || k === "oneoff");
+}
+for (const r of document.querySelectorAll('input[name="jobKind"]')) r.addEventListener("change", showJobKind);
+const ROLE_NAMES = ["planner", "worker", "reviewer", "panel", "judge"];
+// Fill the five role pickers (prefix "job" or "set") from modelInfo. The planner and
+// judge never offer the workers' model; the reviewer and panel may share it.
+function fillRoles(prefix) {
+  if (!modelInfo) return;
+  const worker = $(prefix + "-worker").value || modelInfo.chosen.worker;
+  for (const role of ROLE_NAMES) {
+    const sel = $(prefix + "-" + role);
+    const shared = role === "reviewer" || role === "panel";
+    const current = role === "worker" ? worker : (sel.value || modelInfo.chosen[role] || (shared ? "same" : ""));
+    sel.innerHTML = "";
+    const add = (value, label) => {
+      const opt = document.createElement("option");
+      opt.value = value; opt.textContent = label; opt.selected = value === current;
+      sel.appendChild(opt);
+    };
+    if (shared) add("same", "same model as the workers");
+    for (const o of modelInfo.available) {
+      if ((role === "planner" || role === "judge") && o.spec === worker) continue;   // never judge your own work
+      add(o.spec, o.label);
+    }
+  }
+}
+function fillJobModels() { fillRoles("job"); }
+$("job-worker").addEventListener("change", fillJobModels);
+$("openJob").addEventListener("click", async () => {
+  openOverlay("jobForm");
+  $("jobStatus").textContent = "finding your projects and repos…";
+  try {
+    const [w, m] = await Promise.all([fetch("api/where").then((r) => r.json()), fetch("api/models").then((r) => r.json())]);
+    whereInfo = w; modelInfo = m;
+    $("jobLocal").innerHTML = "";
+    for (const r of w.local) {
+      const o = document.createElement("option");
+      o.value = r.path;
+      o.textContent = `${r.name} [${r.branch}]` + (r.dirty ? " — has uncommitted changes" : "") + (r.protected ? " — protected (never pushed)" : "");
+      $("jobLocal").appendChild(o);
+    }
+    $("jobGithub").innerHTML = "";
+    for (const r of w.github) {
+      const o = document.createElement("option");
+      o.value = r.github;
+      o.textContent = `${r.github}` + (r.local ? " (pull the latest into your copy)" : " (clone it)");
+      $("jobGithub").appendChild(o);
+    }
+    for (const role of ROLE_NAMES) $("job-" + role).value = "";
+    fillJobModels(); showJobKind();
+    $("jobStatus").textContent = "Everything happens on a separate branch; nothing is merged or pushed until you choose Keep.";
+    $("jobTask").focus();
+  } catch (e) { $("jobStatus").textContent = "could not load: the visualizer server is not running"; }
+});
+$("closeJob").addEventListener("click", () => { $("jobForm").hidden = true; });
+if (new URLSearchParams(location.search).has("newjob")) setTimeout(() => $("openJob").click(), 300);
+{
+  // links straight to a view: ?run=RUN shows that run; ?open=history|memory|queue|changes|models opens a panel
+  const params = new URLSearchParams(location.search);
+  // after the rest of the script has run, so selectedRun exists
+  if (params.get("run")) setTimeout(() => { selectedRun = params.get("run"); refreshTabs(); }, 0);
+  if (params.has("sweepdemo")) setTimeout(() => sendJanitor(["worktrees", "shots", "orphan_runs"]), 800);
+  const button = { history: "openHistory", memory: "openMemory", queue: "openQueue", models: "openSettings", setup: "openSetup",
+                   changes: "viewChangesBtn" }[params.get("open")];
+  if (button) setTimeout(() => $(button).click(), 2500);
+}
+$("queueJob").addEventListener("click", async () => {
+  const body = jobBody();
+  if (!body.task.trim()) { $("jobStatus").textContent = "say what the agents should do first"; return; }
+  try {
+    const res = await postJSON("api/queue/add", body);
+    $("jobStatus").textContent = res.ok ? (await res.json()).detail : `not queued: ${await res.text()}`;
+    if (res.ok) { $("jobTask").value = ""; refreshQueue(false); }
+  } catch (e) { $("jobStatus").textContent = "not queued: the visualizer server is not running"; }
+});
+$("startJob").addEventListener("click", async () => {
+  const kind = jobKind();
+  const body = jobBody();
+  if (!body.task.trim()) { $("jobStatus").textContent = "say what the agents should do first"; return; }
+  $("startJob").disabled = true;
+  $("jobStatus").textContent = kind === "github" ? "getting the latest from GitHub, then starting…" : "starting…";
+  try {
+    const res = await fetch("api/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (res.ok) {
+      $("jobStatus").textContent = (await res.json()).detail.split("\n").slice(0, 3).join(" · ");
+      selectedRun = null;
+      setTimeout(() => { $("jobForm").hidden = true; $("jobTask").value = ""; }, 2500);
+    } else {
+      $("jobStatus").textContent = `not started: ${await res.text()}`;
+    }
+  } catch (e) { $("jobStatus").textContent = "not started: the visualizer server is not running"; }
+  $("startJob").disabled = false;
+});
+
+let modelInfo = null;
+function fillSettings() { fillRoles("set"); }
+function fillPresets() {
+  const sel = $("set-preset");
+  sel.innerHTML = "";
+  const add = (value, label, disabled) => {
+    const opt = document.createElement("option");
+    opt.value = value; opt.textContent = label; opt.disabled = !!disabled;
+    opt.selected = value === (modelInfo.preset || "");
+    sel.appendChild(opt);
+  };
+  add("", "my own choices");
+  for (const p of modelInfo.presets || []) add(p.id, p.roles ? p.name : `${p.name} (needs ${p.missing.join(" and ")})`, !p.roles);
+  showPreset();
+}
+function showPreset() {
+  const p = (modelInfo.presets || []).find((x) => x.id === $("set-preset").value);
+  $("presetAbout").textContent = p ? `${p.about} Panel of ${p.tuning.panel_size}.` : "pick a ready-made team, or choose each role below";
+}
+$("set-preset").addEventListener("change", () => {
+  const p = (modelInfo.presets || []).find((x) => x.id === $("set-preset").value);
+  if (p && p.roles) {
+    $("set-worker").value = p.roles.worker;
+    fillRoles("set");
+    for (const role of ROLE_NAMES) $("set-" + role).value = p.roles[role] || "same";
+  }
+  showPreset();
+});
+for (const role of ROLE_NAMES) {
+  $("set-" + role).addEventListener("change", () => {
+    $("set-preset").value = "";              // picked by hand now
+    showPreset();
+    if (role === "worker") fillRoles("set");
+  });
+}
+$("openSettings").addEventListener("click", async () => {
+  openOverlay("settings");
+  $("settingsStatus").textContent = "looking for installed models…";
+  try {
+    modelInfo = await (await fetch("api/models", { cache: "no-store" })).json();
+    for (const role of ROLE_NAMES) $("set-" + role).value = "";
+    fillSettings();
+    fillPresets();
+    $("set-cap").value = modelInfo.max_usd ? String(modelInfo.max_usd) : "";
+    $("settingsStatus").textContent = "The planner and judge can't be the workers' own model. To change them for one job only, use NEW JOB.";
+  } catch (e) { $("settingsStatus").textContent = "could not list models: the visualizer server is not running"; }
+});
+$("closeSettings").addEventListener("click", () => { $("settings").hidden = true; });
+$("saveSettings").addEventListener("click", async () => {
+  const preset = $("set-preset").value;
+  const body = preset ? { preset } : Object.fromEntries(ROLE_NAMES.map((role) => [role, $("set-" + role).value]));
+  body.max_usd = $("set-cap").value.trim() === "" ? 0 : $("set-cap").value.trim();
+  try {
+    const res = await fetch("api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    $("settingsStatus").textContent = res.ok ? "saved: the next runs use these" : `not saved: ${await res.text()}`;
+  } catch (e) { $("settingsStatus").textContent = "not saved: the visualizer server is not running"; }
+});
+$("stopRun").addEventListener("click", async () => {
+  if (!confirm("Stop this run? Everything it has done so far is kept on its branch.")) return;
+  try {
+    const res = await fetch("api/stop-run", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    $("stopRun").textContent = res.ok ? "STOPPING…" : "NOT STOPPED";
+  } catch (e) { $("stopRun").textContent = "NOT STOPPED"; }
+});
+$("answerForm").addEventListener("submit", (e) => { e.preventDefault(); sendAnswer($("answerText").value); });
+for (const b of document.querySelectorAll(".answer .quick")) b.addEventListener("click", () => sendAnswer(b.dataset.answer));
+
+let selectedRun = null;   // null: follow the newest live run
+async function refreshTabs() {
+  if (DEMO) return;
+  try {
+    const runs = await (await fetch("api/runs", { cache: "no-store" })).json();
+    const live = runs.filter((r) => r.live);
+    const show = live.length > 1 || selectedRun;
+    $("tabs").hidden = !show;
+    if (!show) return;
+    $("tabs").innerHTML = "";
+    const follow = document.createElement("button");
+    follow.className = "tab" + (selectedRun ? "" : " on");
+    follow.textContent = "follow newest";
+    follow.onclick = () => { selectedRun = null; refreshTabs(); };
+    $("tabs").appendChild(follow);
+    for (const r of runs) {
+      const b = document.createElement("button");
+      b.className = "tab" + (selectedRun === r.run ? " on" : "");
+      const dot = document.createElement("span");
+      dot.className = "dot " + (r.waiting ? "wait" : r.live ? "live" : r.approved ? "ok" : "bad");
+      b.appendChild(dot);
+      b.appendChild(document.createTextNode(r.task));
+      b.title = r.run;
+      b.onclick = () => { selectedRun = r.run; refreshTabs(); };
+      $("tabs").appendChild(b);
+    }
+  } catch (e) { /* the state poll reports a dead server */ }
+}
+setInterval(refreshTabs, 3000);
+refreshTabs();
+
+async function poll() {
+  const t = performance.now() / 1000;
+  try {
+    const url = selectedRun ? `api/state?run=${encodeURIComponent(selectedRun)}` : "api/state";
+    const next = DEMO ? demoState() : await (await fetch(url, { cache: "no-store" })).json();
+    ingest(next, t);
+  } catch (e) {
+    $("pill").className = "pill bad"; $("pillText").textContent = "VISUALIZER SERVER NOT RUNNING";
+  }
+  setTimeout(poll, DEMO ? 500 : 1000);
+}
+poll();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

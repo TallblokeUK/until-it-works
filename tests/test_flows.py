@@ -1,0 +1,674 @@
+"""End-to-end flows through the real orchestrator, worker, gates and git, with
+scripted agents in place of the real models."""
+import json
+import os
+import re
+import tempfile
+import threading
+import unittest
+
+from helpers import Script, approve, context, log, make_repo, sh, wait_for, write
+
+from mp_agent.orchestrator import Orchestrator
+from mp_agent.providers import Reply
+
+CHECK = "test -f done.txt && grep -q ok done.txt"
+
+
+def plan_reply(plan):
+    return "Here is the plan.\n```json\n" + json.dumps(plan) + "\n```"
+
+
+def single(check=CHECK, **extra):
+    return {"mode": "single", "summary": "one unit", "contract": {"done": ["done.txt says ok"],
+            "out_of_scope": ["unicode"]}, "check": check, "tests": None, "subtasks": [], **extra}
+
+
+def orchestrate(ctx, repo):
+    trees = tempfile.mkdtemp(prefix="mp-test-trees-")
+    return Orchestrator(ctx, "test task", repo, trees).run()
+
+
+def on_branch(repo, result, path):
+    return sh(repo, "git", "show", f"{result['branch']}:{path}")
+
+
+class SingleMode(unittest.TestCase):
+    def test_happy_path(self):
+        repo = make_repo({"README": "x"})
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done",
+                         review=approve, panel=approve)
+        auditor = Script(audit=approve)
+        lead = Script(plan=lambda *a: plan_reply(single()))
+        ctx = context(builder, auditor, lead)
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertEqual(on_branch(repo, result, "done.txt"), "ok\n")
+        self.assertEqual(builder.count("panel"), 3)
+        self.assertRegex(log(ctx), r"(?m)^approved: checks pass, the reviewer and the panel approved, and fake approved it$")
+        self.assertFalse(gitops_dirty(repo))
+
+    def test_reviewer_panel_and_judge_can_each_be_their_own_model(self):
+        repo = make_repo({"README": "x"})
+        builder = Script("builder", implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done")
+        reviewer = Script("quick", review=approve)
+        panel = Script("lenses", panel=approve)
+        judge = Script("judge", audit=approve)
+        ctx = context(builder, judge, Script(plan=lambda *a: plan_reply(single())), reviewer=reviewer, panel=panel,
+                      panel_size=2)
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertEqual((builder.count("implement"), builder.count("review"), builder.count("panel")), (1, 0, 0))
+        self.assertEqual((reviewer.count("review"), panel.count("panel"), judge.count("audit")), (1, 2, 1))
+        self.assertIn("pre-audit panel: 2 lens(es), lenses", log(ctx))
+        self.assertIn("gates      check → quick review by quick → panel of lenses → audit by judge", log(ctx))
+        self.assertEqual(ctx.run.counters["reviewer_calls"], 1)
+        self.assertEqual(ctx.run.counters["panel_calls"], 2)
+        plan_prompt = next(c[1] for c in ctx.planner.calls if c[0] == "plan")
+        self.assertIn("- workers: builder\n- quick reviewer: quick\n- panel: lenses\n- final judge: judge", plan_prompt)
+
+    def test_cline_checkpoint_refs_from_the_run_are_dropped(self):
+        repo = make_repo({"README": "x"})
+        sh(repo, "git", "update-ref", "refs/cline/checkpoints/mine/1", "HEAD")
+        strays = []
+
+        def implement(prompt, cwd):
+            write(cwd, "done.txt", "ok\n")
+            sh(cwd, "git", "update-ref", "refs/cline/checkpoints/run/1", "HEAD")
+            write(cwd + "-guessed-longer-name", "index.html", "stray")
+            strays.append(cwd + "-guessed-longer-name")
+            return "done"
+
+        builder = Script(implement=implement, review=approve, panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(single())))
+        self.assertTrue(orchestrate(ctx, repo)["approved"], log(ctx))
+        self.assertEqual(sh(repo, "git", "for-each-ref", "--format=%(refname)", "refs/cline").split(),
+                         ["refs/cline/checkpoints/mine/1"])
+        self.assertIn("removed a stray folder an agent created", log(ctx))
+        self.assertFalse(os.path.exists(strays[0]))
+
+    def test_objection_decision_then_approval(self):
+        repo = make_repo()
+        state = {"reviews": 0}
+
+        def implement(prompt, cwd):
+            if "found problems" in prompt:
+                write(cwd, "done.txt", "ok\n")
+                return "fixed\nDECISION: wrote ok on its own line"
+            write(cwd, "done.txt", "ok")
+            return "first try"
+
+        def review(prompt, cwd):
+            state["reviews"] += 1
+            return approve() if state["reviews"] > 1 else "C1 needs a newline\nVERDICT: CHANGES REQUIRED"
+
+        builder = Script(implement=implement, review=review, panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(single())))
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("reviewer asked for changes", log(ctx))
+        decisions = json.loads(ctx.run.read_text("decisions.json"))
+        self.assertEqual(decisions[0]["text"], "wrote ok on its own line")
+        # the next reviewer sees the decision
+        last_review = [c for c in builder.calls if c[0] == "review"][-1][1]
+        self.assertIn("D1 (decided): wrote ok on its own line", last_review)
+
+    def test_reviewer_vandalism_is_restored(self):
+        repo = make_repo()
+
+        def vandal(prompt, cwd):
+            write(cwd, "done.txt", "vandalised\n")
+            return approve()
+
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done",
+                         review=vandal, panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(single())))
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("restoring the implementer's version", log(ctx))
+        self.assertEqual(on_branch(repo, result, "done.txt"), "ok\n")
+
+
+class Escalation(unittest.TestCase):
+    def test_stall_gets_a_ruling_that_settles_it(self):
+        repo = make_repo()
+
+        def review(prompt, cwd):
+            if "A1: trailing newline is not required" in prompt:
+                return approve()
+            return "needs a trailing newline\nVERDICT: CHANGES REQUIRED"
+
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok") or "same every time",
+                         review=review, panel=approve)
+        lead = Script(plan=lambda *a: plan_reply(single()),
+                        ruling=lambda *a: "AMENDMENT: trailing newline is not required\nbecause C1 says ok")
+        ctx = context(builder, Script(audit=approve), lead, patience=2)
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("no progress: 2 passes in a row changed nothing", log(ctx))
+        self.assertIn("ruling A1: trailing newline is not required", log(ctx))
+
+    def test_stuck_asks_the_person_and_resumes_on_answer(self):
+        repo = make_repo()
+
+        def review(prompt, cwd):
+            if "decided: yes, plain ok is fine" in prompt:
+                return approve()
+            return "unclear\nVERDICT: CHANGES REQUIRED"
+
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok") or "same",
+                         review=review, panel=approve)
+        lead = Script(plan=lambda *a: plan_reply(single()), ruling=lambda *a: "NO AMENDMENT",
+                        replan=lambda *a: "cannot", question=lambda *a: "QUESTION: Is plain ok fine?")
+        ctx = context(builder, Script(audit=approve), lead, patience=2)
+
+        def person():
+            if wait_for(os.path.join(ctx.run.dir, "question.json")):
+                with open(os.path.join(ctx.run.dir, "answer.json"), "w") as fh:
+                    json.dump({"answer": "yes, plain ok is fine"}, fh)
+
+        threading.Thread(target=person, daemon=True).start()
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("waiting for you: Is plain ok fine?", log(ctx))
+        self.assertIn("you answered: yes, plain ok is fine", log(ctx))
+        self.assertFalse(os.path.exists(os.path.join(ctx.run.dir, "question.json")))
+
+    def test_question_from_an_approving_auditor_does_not_cost_another_round(self):
+        repo = make_repo()
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done",
+                         review=approve, panel=approve)
+        auditor = Script(audit=lambda *a: "Fine.\nAMBIGUITY: must ok be lowercase?\nVERDICT: APPROVED")
+        lead = Script(plan=lambda *a: plan_reply(single()), ruling=lambda *a: "AMENDMENT: lowercase ok is fine")
+        ctx = context(builder, auditor, lead)
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("ruling A1: lowercase ok is fine", log(ctx))
+        self.assertIn("ruling recorded; the approval stands", log(ctx))
+        self.assertEqual(builder.count("implement"), 1)
+        self.assertEqual(auditor.count("audit"), 1)
+
+    def test_ruling_without_amendment_passes_its_advice_on_before_asking(self):
+        repo = make_repo()
+
+        def implement(prompt, cwd):
+            if "write ok on its own line" in prompt:
+                write(cwd, "done.txt", "ok\n")
+                return "followed the advice"
+            write(cwd, "done.txt", "ko\n")
+            return "same every time"
+
+        lead = Script(plan=lambda *a: plan_reply(single()),
+                        ruling=lambda *a: "NO AMENDMENT\n\nThe contract is fine; write ok on its own line.",
+                        replan=lambda *a: self.fail("should not re-plan"),
+                        question=lambda *a: self.fail("should not ask"))
+        builder = Script(implement=implement, review=approve, panel=approve)
+        ctx = context(builder, Script(audit=approve), lead, patience=2)
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("the planner made no amendment but gave advice: The contract is fine", log(ctx))
+
+    def test_invalid_replan_json_is_asked_for_again(self):
+        repo = make_repo()
+        replies = ['```json\n{"goal": "g", "done": ["done.txt says ok"], "guidance": "x"]}\n```',
+                   '```json\n{"goal": "g", "done": ["done.txt says ok"], "guidance": "write ok, newline"}\n```']
+
+        def implement(prompt, cwd):
+            write(cwd, "done.txt", "ok\n" if "write ok, newline" in prompt else "ko\n")
+            return "done"
+
+        lead = Script(plan=lambda *a: plan_reply(single()), ruling=lambda *a: "NO AMENDMENT",
+                        replan=lambda *a: replies.pop(0))
+        builder = Script(implement=implement, review=approve, panel=approve)
+        ctx = context(builder, Script(audit=approve), lead, patience=2)
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertEqual(lead.count("replan"), 2)
+        self.assertIn("re-planned: write ok, newline", log(ctx))
+
+    def test_no_ask_stops_honestly(self):
+        repo = make_repo()
+        builder = Script(implement=lambda p, cwd: "did nothing", review=approve, panel=approve)
+        lead = Script(plan=lambda *a: plan_reply(single()), ruling=lambda *a: "NO AMENDMENT",
+                        replan=lambda *a: "no", question=lambda *a: "QUESTION: help?")
+        ctx = context(builder, Script(audit=approve), lead, patience=2, ask=False)
+        result = orchestrate(ctx, repo)
+        self.assertFalse(result["approved"])
+        self.assertRegex(result["outcome"], r"^NOT approved: stuck")
+
+
+class ProviderTrouble(unittest.TestCase):
+    def test_rate_limited_implementer_asks_then_resumes(self):
+        repo = make_repo()
+        state = {"calls": 0}
+
+        def implement(prompt, cwd):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                return Reply("Error: Rate limit reached: input token limit exceeded", 1)
+            write(cwd, "done.txt", "ok\n")
+            return "done"
+
+        builder = Script(implement=implement, review=approve, panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(single())))
+
+        def person():
+            if wait_for(os.path.join(ctx.run.dir, "question.json")):
+                with open(os.path.join(ctx.run.dir, "answer.json"), "w") as fh:
+                    json.dump({"answer": "retry"}, fh)
+
+        threading.Thread(target=person, daemon=True).start()
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("provider trouble: fake is still rate limited", log(ctx))
+        self.assertNotIn("no progress", log(ctx))
+
+    def test_crashed_reviewer_is_run_again_without_reimplementing(self):
+        repo = make_repo()
+        state = {"reviews": 0}
+
+        def review(prompt, cwd):
+            state["reviews"] += 1
+            return Reply("TypeError: cline crashed", 1) if state["reviews"] == 1 else approve()
+
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done",
+                         review=review, panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(single())))
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("review could not run (exit 1); running it again", log(ctx))
+        self.assertEqual(builder.count("implement"), 1)
+
+    def test_out_of_usage_auditor_stops_with_the_reason_when_asking_is_off(self):
+        repo = make_repo()
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done",
+                         review=approve, panel=approve)
+        auditor = Script(audit=lambda *a: Reply("Claude AI usage limit reached|1789500000", 1))
+        ctx = context(builder, auditor, Script(plan=lambda *a: plan_reply(single())), ask=False)
+        result = orchestrate(ctx, repo)
+        self.assertFalse(result["approved"])
+        self.assertIn("provider trouble: fake cannot continue (out of credit or usage", log(ctx))
+        self.assertIn("NOT approved: the final reviewer could not run", result["outcome"])
+
+
+class ProjectMemory(unittest.TestCase):
+    def test_rulings_are_remembered_and_given_to_the_next_plan(self):
+        repo = make_repo()
+        state = tempfile.mkdtemp(prefix="mp-test-state-")
+
+        def review(prompt, cwd):
+            if "A1: trailing newline is not required" in prompt:
+                return approve()
+            return "needs a trailing newline\nVERDICT: CHANGES REQUIRED"
+
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok") or "same", review=review, panel=approve)
+        lead = Script(plan=lambda *a: plan_reply(single()),
+                        ruling=lambda *a: "AMENDMENT: trailing newline is not required")
+        ctx = context(builder, Script(audit=approve), lead, patience=2)
+        trees = os.path.join(state, "worktrees")
+        self.assertTrue(Orchestrator(ctx, "first task", repo, trees).run()["approved"], log(ctx))
+        self.assertIn("remembered for next time", log(ctx))
+
+        lead2 = Script(plan=lambda *a: plan_reply(single()))
+        builder2 = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done", review=approve,
+                          panel=approve)
+        ctx2 = context(builder2, Script(audit=approve), lead2)
+        self.assertTrue(Orchestrator(ctx2, "second task", repo, trees).run()["approved"], log(ctx2))
+        plan_prompt = lead2.calls[0][1]
+        self.assertIn("What earlier runs on this project settled", plan_prompt)
+        self.assertIn("trailing newline is not required", plan_prompt)
+
+
+class Resume(unittest.TestCase):
+    def resume(self, old_ctx, repo, trees, builder, lead=None):
+        from mp_agent.cli import load_resume
+        info = load_resume(old_ctx.run.dir, trees)
+        ctx = context(builder, Script(audit=approve), lead or Script())
+        ctx.decisions.items = list(info["decisions"])
+        return ctx, Orchestrator(ctx, "test task", repo, trees, resume=info).run()
+
+    def test_single_unit_carries_on_from_the_code_on_disk(self):
+        repo, trees = make_repo(), tempfile.mkdtemp(prefix="mp-test-trees-")
+        holder = {}
+
+        def stop_while_reviewing(prompt, cwd):
+            holder["ctx"].halt("stopped by you")
+            return approve()
+
+        first = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done\nDECISION: wrote ok",
+                       review=stop_while_reviewing, panel=approve)
+        ctx = context(first, Script(audit=approve), Script(plan=lambda *a: plan_reply(single())))
+        holder["ctx"] = ctx
+        result = Orchestrator(ctx, "test task", repo, trees).run()
+        self.assertEqual(result["outcome"], "NOT approved: stopped by you")
+
+        second = Script(implement=lambda p, cwd: self.fail("should judge the existing work first"),
+                        review=approve, panel=approve)
+        ctx2, result2 = self.resume(ctx, repo, trees, second)
+        self.assertTrue(result2["approved"], log(ctx2))
+        self.assertIn("resuming", log(ctx2))
+        self.assertEqual(sh(repo, "git", "show", f"{result['branch']}:done.txt"), "ok\n")
+        self.assertEqual(ctx2.decisions.items[0]["text"], "wrote ok")
+
+    def test_swarm_keeps_approved_subtasks_and_finishes_the_rest(self):
+        repo, trees = make_repo(), tempfile.mkdtemp(prefix="mp-test-trees-")
+        holder = {}
+
+        def implement(prompt, cwd):
+            name = re.search(r"# Task\n\nwrite (\w)\.txt", prompt)
+            if name and name.group(1) == "b" and "stop-b" in holder:
+                holder["ctx"].halt("stopped by you")
+                return "stopped"
+            if name:
+                write(cwd, f"{name.group(1)}.txt", name.group(1))
+                return "wrote"
+            return "nothing to do"
+
+        holder["stop-b"] = True
+        first = Script(implement=implement, review=approve, panel=approve)
+        ctx = context(first, Script(audit=approve), Script(plan=lambda *a: plan_reply(Swarm.PLAN)), workers=1)
+        holder["ctx"] = ctx
+        result = Orchestrator(ctx, "test task", repo, trees).run()
+        self.assertFalse(result["approved"])
+        self.assertEqual(ctx.units["a"]["state"], "approved")
+
+        holder.pop("stop-b")
+        second = Script(implement=implement, review=approve, panel=approve)
+        ctx2, result2 = self.resume(ctx, repo, trees, second)
+        self.assertTrue(result2["approved"], log(ctx2))
+        text = log(ctx2)
+        self.assertIn("a: already approved; merging it", text)
+        self.assertNotIn("[a] ── pass", text)
+        for name in "abc":
+            self.assertEqual(sh(repo, "git", "show", f"{result['branch']}:{name}.txt"), name)
+
+
+class KeepAndDiscard(unittest.TestCase):
+    def finished(self):
+        repo = make_repo({"README": "x"})
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done",
+                         review=approve, panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(single())))
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        return repo, ctx.run.dir, result
+
+    def test_keep_merges_and_records(self):
+        from mp_agent import actions
+        repo, run_dir, result = self.finished()
+        self.assertIn("merged into main", actions.keep(run_dir))
+        self.assertEqual(sh(repo, "cat", "done.txt"), "ok\n")
+        self.assertEqual(sh(repo, "git", "branch", "--list", result["branch"]).strip(), "")
+        with self.assertRaises(actions.ActionError):
+            actions.keep(run_dir)
+
+    def test_keep_refuses_a_dirty_project(self):
+        from mp_agent import actions
+        repo, run_dir, _ = self.finished()
+        write(repo, "README", "local edit")
+        with self.assertRaisesRegex(actions.ActionError, "uncommitted"):
+            actions.keep(run_dir)
+
+    def test_conflict_changes_nothing(self):
+        from mp_agent import actions
+        repo, run_dir, _ = self.finished()
+        write(repo, "done.txt", "different\n")
+        sh(repo, "git", "add", "-A")
+        sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "clash")
+        with self.assertRaisesRegex(actions.ActionError, "conflict"):
+            actions.keep(run_dir)
+        self.assertEqual(sh(repo, "cat", "done.txt"), "different\n")
+        self.assertFalse(gitops_dirty(repo))
+
+    def test_discard_deletes_the_branch(self):
+        from mp_agent import actions
+        repo, run_dir, result = self.finished()
+        actions.discard(run_dir)
+        self.assertEqual(sh(repo, "git", "branch", "--list", result["branch"]).strip(), "")
+
+
+class NewTools(unittest.TestCase):
+    def finished(self, remote=None):
+        repo = make_repo({"README": "x"})
+        if remote:
+            sh(repo, "git", "remote", "add", "origin", remote)
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done",
+                         review=approve, panel=approve)
+        ctx = context(builder, Script(audit=lambda *a: "Looks right; one remark.\nVERDICT: APPROVED"),
+                      Script(plan=lambda *a: plan_reply(single())))
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        return repo, ctx.run.dir, result
+
+    def test_changes_lists_files_diff_and_judge_notes(self):
+        from mp_agent import actions
+        repo, run_dir, result = self.finished()
+        info = actions.changes(run_dir)
+        self.assertEqual([f["path"] for f in info["files"]], ["done.txt"])
+        self.assertIn("+ok", info["diff"])
+        self.assertIn("one remark", info["judge"])
+
+    def test_pull_request_refuses_protected_repos_and_repos_without_github(self):
+        from mp_agent import actions
+        state = tempfile.mkdtemp(prefix="mp-state-")
+        write(state, "config.json", json.dumps({"protected": ["keepout/db-web"]}))
+        _, run_dir, _ = self.finished(remote="https://github.com/keepout/db-web.git")
+        with self.assertRaisesRegex(actions.ActionError, "listed as protected"):
+            actions.pull_request(run_dir, state_dir=state)
+        _, run_dir, _ = self.finished()
+        with self.assertRaisesRegex(actions.ActionError, "no GitHub remote"):
+            actions.pull_request(run_dir)
+
+    def test_spending_cap_asks_and_can_be_raised(self):
+        class FakeUsage:
+            def refresh(self, force=False):
+                pass
+
+            def totals(self):
+                return {"inception/mercury-2.5": {"usd": 1.5}, "claude-sonnet-5": {"usd": 9.0}}
+
+        repo = make_repo()
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done", review=approve,
+                         panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(single())), max_usd=1.0)
+        ctx.usage = FakeUsage()
+
+        def person():
+            if wait_for(os.path.join(ctx.run.dir, "question.json")):
+                with open(os.path.join(ctx.run.dir, "answer.json"), "w") as fh:
+                    json.dump({"answer": "raise it to 5"}, fh)
+
+        threading.Thread(target=person, daemon=True).start()
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("spending cap reached: $1.50 of $1.00", log(ctx))     # Claude on Max not counted
+        self.assertIn("spending cap raised to $5.00", log(ctx))
+
+    def test_spending_cap_is_checked_before_the_review_stages_too(self):
+        spend = {"usd": 0.0}
+
+        class GrowingUsage:
+            def refresh(self, force=False):
+                pass
+
+            def totals(self):
+                return {"inception/mercury-2.5": {"usd": spend["usd"]}}
+
+        def implement(prompt, cwd):
+            spend["usd"] = 0.5          # the implementer spends past the cap within its first pass
+            write(cwd, "done.txt", "ok\n")
+            return "done"
+
+        repo = make_repo()
+        builder = Script(implement=implement, review=approve, panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(single())), max_usd=0.1,
+                      ask=False)
+        ctx.usage = GrowingUsage()
+        result = orchestrate(ctx, repo)
+        self.assertFalse(result["approved"])
+        self.assertEqual(builder.count("review"), 0)
+        self.assertIn("spending cap", result["outcome"])
+
+    def test_spending_cap_stops_when_told(self):
+        class FakeUsage:
+            def refresh(self, force=False):
+                pass
+
+            def totals(self):
+                return {"inception/mercury-2.5": {"usd": 3.0}}
+
+        repo = make_repo()
+        builder = Script(implement=lambda p, cwd: "never gets here", review=approve, panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(single())), max_usd=1.0,
+                      ask=False)
+        ctx.usage = FakeUsage()
+        result = orchestrate(ctx, repo)
+        self.assertFalse(result["approved"])
+        self.assertIn("spending cap", result["outcome"])
+
+
+class Swarm(unittest.TestCase):
+    PLAN = {
+        "mode": "swarm", "summary": "three parts",
+        "contract": {"done": ["a, b and c exist"], "out_of_scope": []},
+        "check": "test -f a.txt && test -f b.txt && test -f c.txt",
+        "tests": None,
+        "subtasks": [
+            {"id": "a", "goal": "write a.txt", "owns": ["a.txt"], "done": ["a.txt"], "check": "test -f a.txt"},
+            {"id": "b", "goal": "write b.txt", "owns": ["b.txt"], "done": ["b.txt"], "check": "test -f b.txt"},
+            {"id": "c", "goal": "write c.txt from a and b", "owns": ["c.txt"], "done": ["c.txt"],
+             "depends_on": ["a", "b"], "check": "test -f c.txt && test -f a.txt"},
+        ],
+    }
+
+    def implement(self, prompt, cwd):
+        goal = re.search(r"# Task\n\nwrite (\w)\.txt", prompt)
+        if goal:
+            name = goal.group(1)
+            write(cwd, f"{name}.txt", name)
+            if name == "b":
+                write(cwd, "a.txt", "b trampling a")   # not b's file: must be reverted
+            return f"wrote {name}"
+        return "nothing to do"
+
+    def test_waves_merge_and_final_gates(self):
+        repo = make_repo()
+        builder = Script(implement=self.implement, review=approve, panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(self.PLAN)), workers=2)
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        text = log(ctx)
+        self.assertIn("── wave 1/2: a, b", text)
+        self.assertIn("── wave 2/2: c", text)
+        self.assertIn("[b]    changed files it may not touch (a.txt); reverted", text)
+        self.assertIn("── final gates on the merged work", text)
+        self.assertEqual(on_branch(repo, result, "a.txt"), "a")
+        self.assertEqual(on_branch(repo, result, "c.txt"), "c")
+        self.assertEqual(sh(repo, "git", "worktree", "list").count("\n"), 1)
+
+    def test_failed_subtask_stops_the_run(self):
+        repo = make_repo()
+        builder = Script(implement=lambda p, cwd: "never writes anything", review=approve, panel=approve)
+        lead = Script(plan=lambda *a: plan_reply(self.PLAN), ruling=lambda *a: "NO AMENDMENT",
+                        replan=lambda *a: "no", question=lambda *a: "QUESTION: ?")
+        ctx = context(builder, Script(audit=approve), lead, patience=2, ask=False)
+        result = orchestrate(ctx, repo)
+        self.assertFalse(result["approved"])
+        self.assertIn("NOT approved", result["outcome"])
+
+
+class WaveZero(unittest.TestCase):
+    def test_tests_written_first_then_frozen(self):
+        repo = make_repo()
+        plan = single(check="./agent-check.sh",
+                      tests={"goal": "done.txt says ok", "files": ["agent-check.sh"]})
+
+        def implement(prompt, cwd):
+            if "Write the acceptance tests" in prompt:
+                write(cwd, "agent-check.sh", "#!/bin/sh\ngrep -q ok done.txt\n")
+                os.chmod(os.path.join(cwd, "agent-check.sh"), 0o755)
+                return "tests written"
+            write(cwd, "done.txt", "ok\n")
+            write(cwd, "agent-check.sh", "#!/bin/sh\nexit 0\n")   # weakening the frozen test
+            return "implemented"
+
+        builder = Script(implement=implement, review=approve, panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(plan)))
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("frozen: agent-check.sh", log(ctx))
+        self.assertIn("changed files it may not touch (agent-check.sh); reverted", log(ctx))
+        self.assertIn("grep -q ok done.txt", on_branch(repo, result, "agent-check.sh"))
+        tests_review = next(c[1] for c in builder.calls if c[0] == "review" and "acceptance tests" in c[1])
+        self.assertIn("a script can decide reliably: (1) done.txt says ok", tests_review)
+        self.assertIn("looking at the result in a browser", tests_review)
+        self.assertIn("expected to fail", tests_review)
+
+    def test_a_wrong_frozen_test_is_repaired_not_worked_around(self):
+        repo = make_repo()
+        plan = single(check="./agent-check.sh", tests={"goal": "done.txt says ok", "files": ["agent-check.sh"]})
+        rulings = []
+
+        def implement(prompt, cwd):
+            if "Write the acceptance tests" in prompt:      # a bug: can never pass on correct work
+                write(cwd, "agent-check.sh", "#!/bin/sh\ngrep -q '#ok' done.txt\n")
+                os.chmod(os.path.join(cwd, "agent-check.sh"), 0o755)
+                return "tests written"
+            if "Repair the frozen acceptance tests" in prompt:
+                self.assertFalse(os.path.exists(os.path.join(cwd, "done.txt")))   # away from the work
+                write(cwd, "agent-check.sh", "#!/bin/sh\ngrep -q ok done.txt\n")
+                write(cwd, "done.txt", "not mine to touch\n")
+                return "repaired"
+            write(cwd, "done.txt", "ok\n")
+            return "implemented\nDISPUTE: agent-check.sh looks for '#ok', which correct work never contains"
+
+        def ruling(prompt, cwd):
+            rulings.append(prompt)
+            return "NO AMENDMENT\nTEST FIX: agent-check.sh: it greps for '#ok'; it should grep for ok"
+
+        builder = Script(implement=implement, review=approve, panel=approve)
+        lead = Script(plan=lambda *a: plan_reply(plan), ruling=ruling)
+        ctx = context(builder, Script(audit=approve), lead)
+        result = orchestrate(ctx, repo)
+        text = log(ctx)
+        self.assertTrue(result["approved"], text)
+        self.assertEqual(len(rulings), 1)
+        self.assertIn("the planner says a frozen test is wrong; repairing it", text)
+        self.assertIn("[main-testfix]    changed files it may not touch (done.txt); reverted", text)
+        self.assertIn("frozen test repaired: agent-check.sh", text)
+        self.assertIn("grep -q ok done.txt", on_branch(repo, result, "agent-check.sh"))
+        self.assertEqual(on_branch(repo, result, "done.txt"), "ok\n")
+        self.assertEqual(sh(repo, "git", "worktree", "list").count("\n"), 1)
+
+    def test_reviewers_of_tests_are_not_told_the_code_must_already_work(self):
+        from mp_agent.worker import Worker  # noqa: F401  (keeps the import path honest)
+        repo = make_repo()
+        plan = single(check="./agent-check.sh", tests={"goal": "done.txt says ok", "files": ["agent-check.sh"]})
+        seen = []
+
+        def implement(prompt, cwd):
+            if "Write the acceptance tests" in prompt:
+                write(cwd, "agent-check.sh", "#!/bin/sh\ngrep -q ok done.txt\n")
+                os.chmod(os.path.join(cwd, "agent-check.sh"), 0o755)
+                return "tests"
+            write(cwd, "done.txt", "ok\n")
+            return "done"
+
+        def review(prompt, cwd):
+            seen.append(prompt)
+            return approve()
+
+        builder = Script(implement=implement, review=review, panel=approve)
+        ctx = context(builder, Script(audit=approve), Script(plan=lambda *a: plan_reply(plan)))
+        self.assertTrue(orchestrate(ctx, repo)["approved"], log(ctx))
+        first = seen[0]
+        self.assertNotIn("C1: done.txt says ok", first)
+        self.assertIn("implementing the task itself", first)
+
+
+def gitops_dirty(repo):
+    return bool(sh(repo, "git", "status", "--porcelain").strip())
+
+
+if __name__ == "__main__":
+    unittest.main()

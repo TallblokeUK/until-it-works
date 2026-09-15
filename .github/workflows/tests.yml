@@ -1,0 +1,48 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.12"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit and flow tests
+        run: cd tests && python -m unittest -v 2>&1 | tail -40
+        shell: bash
+      - name: Tests must pass (the step above only shows the tail)
+        run: cd tests && python -m unittest
+      - name: Install, then the commands a new user runs first
+        shell: bash
+        run: |
+          bash -n install.sh
+          ./install.sh
+          export PATH="$HOME/.local/bin:$PATH"
+          mp-agent setup
+          mp-agent models
+          mp-agent keys list
+          mp-agent launchers
+          python -c "import sys; sys.path.insert(0, '.'); from mp_agent import desktop; print('screen', desktop.screen_size(), 'window', desktop.window_size(), 'notify', desktop.can_notify())"
+      - name: A key really goes into the keychain and back (macOS keychain on the Mac)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          printf 'dummy-ci-key-with"quote-ab12\n' | mp-agent keys set openrouter
+          mp-agent keys list | grep -q 'stored (…ab12)'
+          python -c "import os, sys; sys.path.insert(0, '.'); from mp_agent import keys; env = keys.environment(os.path.expanduser('~/.mp-agent')); assert env == {'OPENROUTER_API_KEY': 'dummy-ci-key-with\"quote-ab12'}, env; print('keychain round trip ok')"
+          mp-agent keys remove openrouter
+          python -c "import os, sys; sys.path.insert(0, '.'); from mp_agent import keys; assert keys.environment(os.path.expanduser('~/.mp-agent')) == {}; print('removed ok')"

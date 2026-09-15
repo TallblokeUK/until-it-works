@@ -1,0 +1,518 @@
+#!/usr/bin/env python3
+"""mp-viz — the pixel-art workshop for mp-agent.
+
+    mp-viz            serve the visualizer on http://127.0.0.1:7788 and open it in its own window
+    mp-viz --no-open  serve without opening a browser
+    mp-viz --stop     stop a running visualizer
+
+mp-agent starts this itself when a run begins (MP_VIZ=0 to turn that off). It
+only opens a browser tab if no tab has looked at it in the last few seconds, so
+back-to-back runs reuse the tab you already have. It exits on its own after 20
+minutes with no live run and nobody watching.
+
+Everything it shows is read from ~/.mp-agent/runs, the same files mp-status
+reads. Add ?demo=1 to the URL for a scripted run that costs nothing. When a run
+asks a question, it can be answered on the page (POST /api/answer, accepted only
+from the page itself).
+"""
+import http.server, json, os, re, shutil, signal, subprocess, sys, threading, time, urllib.request
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+from mp_agent import actions, desktop, history, jobqueue, memory, tidy  # noqa: E402
+from mp_agent.models import ROLES  # noqa: E402
+
+STATE = os.environ.get("MP_HOME", os.path.join(os.path.expanduser("~"), ".mp-agent"))
+
+PORT = int(os.environ.get("MP_VIZ_PORT", "7788"))
+HOME = os.path.expanduser("~")
+RUNS = os.environ.get("MP_RUNS", os.path.join(HOME, ".mp-agent", "runs"))
+# The page ships beside this script in the mp-agent repo (bin/../viz/index.html).
+PAGE = os.environ.get("MP_VIZ_PAGE") or os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "viz", "index.html")
+URL = f"http://127.0.0.1:{PORT}/"
+IDLE_EXIT = 20 * 60
+
+last_poll = 0.0
+last_busy = time.time()
+
+
+def alive(run):
+    try:
+        with open(os.path.join(run, "pid")) as f:
+            os.kill(int(f.read().strip()), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def read(path, limit=None):
+    try:
+        with open(path, errors="replace") as f:
+            return f.read() if limit is None else f.read()[-limit:]
+    except OSError:
+        return ""
+
+
+def all_runs():
+    try:
+        runs = sorted((os.path.join(RUNS, d) for d in os.listdir(RUNS)), key=os.path.getmtime, reverse=True)
+    except OSError:
+        return []
+    return [r for r in runs if os.path.isdir(r)]
+
+
+def run_list():
+    """Live runs, then the few most recent finished ones, for the tab bar."""
+    out = []
+    for r in all_runs()[:30]:
+        is_live = alive(r)
+        if not is_live and len([o for o in out if not o["live"]]) >= 4:
+            continue
+        meta = {}
+        try:
+            meta = json.loads(read(os.path.join(r, "metadata.json")) or "{}")
+        except ValueError:
+            pass
+        out.append({"run": os.path.basename(r), "task": read(os.path.join(r, "task.md")).strip()[:80],
+                    "live": is_live, "approved": meta.get("approved"),
+                    "waiting": is_live and os.path.exists(os.path.join(r, "question.json"))})
+    return out
+
+
+def state(wanted=None):
+    runs = all_runs()
+    chosen = os.path.join(RUNS, os.path.basename(wanted)) if wanted else None
+    if chosen and os.path.isdir(chosen):
+        run = chosen
+        live = run if alive(run) else None
+    else:
+        live = next((r for r in runs if alive(r)), None)
+        run = live or (runs[0] if runs else None)
+    if not run:
+        return {"run": None, "live": False}
+    meta = {}
+    if os.path.exists(os.path.join(run, "metadata.json")):
+        try:
+            meta = json.loads(read(os.path.join(run, "metadata.json")))
+        except ValueError:
+            meta = {}
+    log = read(os.path.join(run, "run.log")).splitlines()
+    started = os.path.getmtime(os.path.join(run, "task.md")) if os.path.exists(os.path.join(run, "task.md")) else time.time()
+    def jsonfile(name):
+        try:
+            return json.loads(read(os.path.join(run, name)) or "null")
+        except ValueError:
+            return None
+    return {
+        "question": jsonfile("question.json") if live else None,
+        "units": jsonfile("units.json") or {},
+        "usage": jsonfile("usage.json") or {},
+        "activity": [json.loads(l) for l in read(os.path.join(run, "activity.jsonl"), 8000).splitlines()[-40:]
+                     if l.startswith("{") and l.endswith("}")],
+        "plan": jsonfile("plan.json"),
+        "roles": jsonfile("roles.json") or {},
+        "run": os.path.basename(run),
+        "live": bool(live),
+        "task": read(os.path.join(run, "task.md")).strip(),
+        "phase": read(os.path.join(run, "phase")).strip(),
+        "log": log,
+        "elapsed": int((time.time() if live else os.path.getmtime(run)) - started) if live else meta.get("seconds", 0),
+        "passes": len([d for d in os.listdir(run) if d.startswith("iteration-")])
+                  or sum(int((u or {}).get("passes") or 0) for u in (jsonfile("units.json") or {}).values()),
+        "meta": meta,
+    }
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def host_ok(self):
+        """Only requests addressed to this machine. A web page elsewhere can point its own
+        domain name at 127.0.0.1 (DNS rebinding); its requests then carry that name as Host."""
+        if self.headers.get("Host") in (f"127.0.0.1:{PORT}", f"localhost:{PORT}"):
+            return True
+        self.reply(403, "text/plain", b"forbidden")
+        return False
+
+    def body(self, limit=10_000):
+        length = min(int(self.headers.get("Content-Length") or 0), limit)
+        return json.loads(self.rfile.read(length) or b"{}")
+
+    def do_GET(self):
+        global last_poll, last_busy
+        if not self.host_ok():
+            return
+        path = self.path.split("?")[0]
+        if path == "/api/where":
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            proc = subprocess.run([sys.executable, entry, "where", "--json", "--cwd", HOME], capture_output=True,
+                                  text=True, timeout=120)
+            return self.reply(200 if proc.returncode == 0 else 500, "application/json",
+                              (proc.stdout or json.dumps({"error": proc.stderr})).encode())
+        if path == "/api/setup":
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            proc = subprocess.run([sys.executable, entry, "setup", "--json"], capture_output=True, text=True,
+                                  timeout=120)
+            return self.reply(200 if proc.returncode == 0 else 500, "application/json",
+                              (proc.stdout or json.dumps({"error": proc.stderr[-500:]})).encode())
+        if path == "/api/models":
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            proc = subprocess.run([sys.executable, entry, "models", "--json"], capture_output=True, text=True,
+                                  timeout=60)
+            return self.reply(200 if proc.returncode == 0 else 500, "application/json",
+                              (proc.stdout or json.dumps({"error": proc.stderr})).encode())
+        if path == "/api/tidy":
+            return self.reply(200, "application/json", json.dumps(tidy.plan(STATE)).encode())
+        if path == "/api/queue":
+            return self.reply(200, "application/json", json.dumps(jobqueue.listing(STATE)).encode())
+        if path == "/api/history":
+            return self.reply(200, "application/json", json.dumps(history.summarize(RUNS)).encode())
+        if path == "/api/memory":
+            from urllib.parse import parse_qs, urlparse
+            wanted = (parse_qs(urlparse(self.path).query).get("id") or [None])[0]
+            try:
+                body = {"projects": memory.projects(STATE)}
+                if wanted:
+                    body["text"] = memory.read_memory(STATE, wanted)
+                return self.reply(200, "application/json", json.dumps(body).encode())
+            except OSError:
+                return self.reply(404, "text/plain", b"no such project memory")
+        if path == "/api/shot":
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            run = os.path.basename((q.get("run") or [""])[0])
+            name = os.path.basename((q.get("name") or [""])[0])
+            file = os.path.join(RUNS, run, "screenshots", name)
+            if not run or not name or not os.path.isfile(file):
+                return self.reply(404, "text/plain", b"no such screenshot")
+            with open(file, "rb") as fh:
+                return self.reply(200, "image/jpeg" if name.lower().endswith((".jpg", ".jpeg")) else "image/png", fh.read())
+        if path == "/api/runs":
+            return self.reply(200, "application/json", json.dumps(run_list()).encode())
+        if path == "/api/state":
+            last_poll = time.time()
+            from urllib.parse import parse_qs, urlparse
+            s = state((parse_qs(urlparse(self.path).query).get("run") or [None])[0])
+            if s.get("live"):
+                last_busy = time.time()
+            self.reply(200, "application/json", json.dumps(s).encode())
+        elif path == "/api/watched":
+            self.reply(200, "application/json", json.dumps({"watched": time.time() - last_poll < 6}).encode())
+        elif path in ("/", "/index.html"):
+            try:
+                with open(PAGE, "rb") as f:
+                    self.reply(200, "text/html; charset=utf-8", f.read())
+            except OSError as e:
+                self.reply(500, "text/plain", str(e).encode())
+        elif path == "/api/stop":
+            self.reply(200, "text/plain", b"bye")
+            threading.Thread(target=lambda: (time.sleep(0.2), os._exit(0))).start()
+        else:
+            self.reply(404, "text/plain", b"not found")
+
+    def do_POST(self):
+        if not self.host_ok():
+            return
+        path = self.path.split("?")[0]
+        # Only this page may post: a browser sends Origin on cross-site requests,
+        # and a JSON body cannot be sent cross-site without a preflight we never allow.
+        origin = self.headers.get("Origin")
+        if origin not in (None, f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}") or \
+                "application/json" not in (self.headers.get("Content-Type") or ""):
+            return self.reply(403, "text/plain", b"forbidden")
+        if path in ("/api/start", "/api/queue/add"):
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 100_000)
+                job = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            task = str(job.get("task") or "").strip()
+            if not task:
+                return self.reply(400, "text/plain", b"say what the agents should do")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            flags = []
+            kind, value, name = job.get("kind"), str(job.get("value") or ""), str(job.get("name") or "").strip()
+            if kind == "local" and value:
+                flags += ["--repo", value]
+            elif kind == "github" and value:
+                flags += ["--github", value]
+            elif kind == "new":
+                flags += ["--new"] + (["--name", name] if name else [])
+            elif kind == "oneoff":
+                flags += ["--oneoff"] + (["--name", name] if name else [])
+            else:
+                return self.reply(400, "text/plain", b"choose where the agents should work")
+            if job.get("init"):
+                flags.append("--init")
+            for role in ROLES:
+                if job.get(role):
+                    flags += ["--panel-model" if role == "panel" else f"--{role}", str(job[role])]
+            if job.get("max_usd") not in (None, ""):
+                try:
+                    flags += ["--max-usd", str(float(job["max_usd"]))]
+                except ValueError:
+                    return self.reply(400, "text/plain", b"the spending cap must be a number")
+            if path == "/api/queue/add":
+                queued = jobqueue.add(STATE, task, flags)
+                waiting = len(jobqueue.listing(STATE)["jobs"])
+                return self.reply(200, "application/json",
+                                  json.dumps({"detail": f"queued ({waiting} waiting); it starts when nothing else is running",
+                                              "id": queued["id"]}).encode())
+            args = [sys.executable, entry, "start", *flags]
+            try:
+                proc = subprocess.run(args, input=task, capture_output=True, text=True, cwd=HOME, timeout=900)
+            except subprocess.TimeoutExpired:
+                return self.reply(504, "text/plain", b"starting took too long (a large clone?); try again")
+            out = (proc.stdout + proc.stderr).strip()
+            ok = proc.returncode == 0 and "Started:" in out
+            return self.reply(200 if ok else 409, "application/json" if ok else "text/plain",
+                              json.dumps({"detail": out}).encode() if ok else out.replace("NEEDS: ", "").encode())
+        if path == "/api/tidy":
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                chosen = [str(i) for i in (json.loads(self.rfile.read(length) or b"{}").get("items") or [])]
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            return self.reply(200, "application/json", json.dumps({"done": tidy.apply(STATE, chosen)}).encode())
+        if path == "/api/queue/remove":
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                job_id = str(json.loads(self.rfile.read(length) or b"{}").get("id") or "")
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            return self.reply(200, "application/json", json.dumps({"removed": jobqueue.remove(STATE, job_id)}).encode())
+        if path == "/api/memory/save":
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 200_000)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                memory.save_memory(STATE, str(body.get("id") or ""), str(body.get("text") or ""))
+            except (ValueError, OSError) as exc:
+                return self.reply(409, "text/plain", f"not saved: {exc}".encode())
+            return self.reply(200, "application/json", json.dumps({"detail": "saved"}).encode())
+        if path in ("/api/changes", "/api/pr"):
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                run = os.path.join(RUNS, os.path.basename(str(body.get("run") or "")))
+                if path == "/api/changes":
+                    return self.reply(200, "application/json", json.dumps(actions.changes(run)).encode())
+                url = actions.pull_request(run, str(body.get("base") or "").strip() or None)
+                return self.reply(200, "application/json", json.dumps({"detail": url, "url": url}).encode())
+            except actions.ActionError as exc:
+                return self.reply(409, "text/plain", str(exc).encode())
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+        if path == "/api/open-folder":
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                name = os.path.basename(str(json.loads(self.rfile.read(length) or b"{}").get("run") or ""))
+                meta = json.loads(read(os.path.join(RUNS, name, "metadata.json")) or "{}")
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            folder = os.path.realpath(meta.get("project") or "")
+            if not folder.startswith(os.path.realpath(HOME) + os.sep) or not os.path.isdir(folder):
+                return self.reply(404, "text/plain", b"no such folder")
+            desktop.open_folder(folder)
+            return self.reply(200, "application/json", json.dumps({"detail": f"opened {folder}"}).encode())
+        if path in ("/api/keys/set", "/api/keys/remove"):
+            # The key goes to `mp-agent keys set` on stdin, never on a command line, and is never sent back.
+            try:
+                body = self.body()
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            provider = str(body.get("provider") or "")
+            if not re.fullmatch(r"[a-z]{2,20}", provider):
+                return self.reply(400, "text/plain", b"unknown provider")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            if path == "/api/keys/set":
+                proc = subprocess.run([sys.executable, entry, "keys", "set", provider],
+                                      input=str(body.get("key") or "") + "\n", capture_output=True, text=True, timeout=30)
+            else:
+                proc = subprocess.run([sys.executable, entry, "keys", "remove", provider], capture_output=True,
+                                      text=True, timeout=30)
+            if proc.returncode != 0:
+                return self.reply(409, "text/plain", (proc.stderr or proc.stdout).strip().encode())
+            return self.reply(200, "application/json", json.dumps({"detail": proc.stdout.strip()}).encode())
+        if path == "/api/setup/test":
+            try:
+                model = str(self.body().get("model") or "")
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            if not model or len(model) > 200:
+                return self.reply(400, "text/plain", b"which model?")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            try:
+                proc = subprocess.run([sys.executable, entry, "test", model, "--json"], capture_output=True, text=True,
+                                      timeout=240)
+            except subprocess.TimeoutExpired:
+                return self.reply(200, "application/json", json.dumps({"spec": model, "ok": False,
+                                                                       "problem": "no answer within 4 minutes"}).encode())
+            return self.reply(200, "application/json",
+                              (proc.stdout.strip() or json.dumps({"spec": model, "ok": False,
+                                                                  "problem": proc.stderr[-300:]})).encode())
+        if path == "/api/settings":
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                wanted = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            args = [sys.executable, entry, "config"]
+            if wanted.get("preset"):
+                args += ["--preset", str(wanted["preset"])]
+            for role in ROLES:
+                if wanted.get(role):
+                    args += ["--panel-model" if role == "panel" else f"--{role}", str(wanted[role])]
+            if wanted.get("max_usd") not in (None, ""):
+                args += ["--max-usd", str(wanted["max_usd"])]
+            if wanted.get("claude_billing") in ("subscription", "api"):
+                args += ["--claude-billing", wanted["claude_billing"]]
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
+            if proc.returncode != 0:
+                return self.reply(409, "text/plain", (proc.stderr or proc.stdout).encode())
+            return self.reply(200, "application/json", json.dumps({"detail": proc.stdout}).encode())
+        if path == "/api/resume":
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                name = os.path.basename(str(json.loads(self.rfile.read(length) or b"{}").get("run") or ""))
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            run = os.path.join(RUNS, name)
+            if not name or not os.path.isdir(run):
+                return self.reply(404, "text/plain", b"no such run")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            proc = subprocess.run([sys.executable, entry, "resume", "--run", run], capture_output=True, text=True,
+                                  timeout=60)
+            if proc.returncode != 0:
+                return self.reply(409, "text/plain", (proc.stdout + proc.stderr).replace("NEEDS: ", "").encode())
+            return self.reply(200, "application/json", json.dumps({"detail": proc.stdout.strip()}).encode())
+        if path in ("/api/keep", "/api/discard", "/api/describe"):
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                name = os.path.basename(str(json.loads(self.rfile.read(length) or b"{}").get("run") or ""))
+                run = os.path.join(RUNS, name)
+                if not name or not os.path.isdir(run):
+                    return self.reply(404, "text/plain", b"no such run")
+                if path == "/api/describe":
+                    result = actions.describe(run)
+                else:
+                    result = {"detail": (actions.keep if path == "/api/keep" else actions.discard)(run)}
+                return self.reply(200, "application/json", json.dumps(result).encode())
+            except actions.ActionError as exc:
+                return self.reply(409, "text/plain", str(exc).encode())
+            except Exception as exc:  # keep the server alive; report what went wrong
+                return self.reply(500, "text/plain", f"{type(exc).__name__}: {exc}".encode())
+        if path == "/api/stop-run":
+            for run in sorted((os.path.join(RUNS, d) for d in os.listdir(RUNS)), key=os.path.getmtime, reverse=True):
+                if alive(run):
+                    try:
+                        with open(os.path.join(run, "pid")) as fh:
+                            pid = int(fh.read().strip())
+                        if "mp-agent" not in desktop.command_of(pid):
+                            continue
+                        os.kill(pid, signal.SIGTERM)
+                        return self.reply(200, "application/json", json.dumps({"ok": True}).encode())
+                    except (OSError, ValueError):
+                        continue
+            return self.reply(409, "text/plain", b"nothing is running")
+        if path != "/api/answer":
+            return self.reply(404, "text/plain", b"not found")
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+            answer = str(json.loads(self.rfile.read(length) or b"{}").get("answer") or "").strip()
+        except (ValueError, AttributeError):
+            return self.reply(400, "text/plain", b"bad request")
+        if not answer:
+            return self.reply(400, "text/plain", b"empty answer")
+        try:
+            runs = sorted((os.path.join(RUNS, d) for d in os.listdir(RUNS)), key=os.path.getmtime, reverse=True)
+        except OSError:
+            runs = []
+        waiting = next((r for r in runs if alive(r) and os.path.exists(os.path.join(r, "question.json"))), None)
+        if not waiting:
+            return self.reply(409, "text/plain", b"no run is waiting for an answer")
+        tmp = os.path.join(waiting, "answer.json.tmp")
+        with open(tmp, "w") as fh:
+            json.dump({"answer": answer}, fh)
+        os.replace(tmp, os.path.join(waiting, "answer.json"))
+        self.reply(200, "application/json", json.dumps({"ok": True}).encode())
+
+    def reply(self, code, ctype, body):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def get(path):
+    try:
+        with urllib.request.urlopen(URL + path, timeout=1) as r:
+            return json.loads(r.read() or b"{}") if path.startswith("api/w") else True
+    except Exception:
+        return None
+
+
+def open_browser():
+    """Open the workshop in its own app-style window, so it can sit beside your
+    editor or terminal rather than getting lost among browser tabs."""
+    how = desktop.open_app_window(URL)
+    print(f"visualizer: {URL}" + (" (opened in its own window)" if how == "app window" else ""), flush=True)
+
+
+def queue_runner():
+    """Start the next queued job whenever nothing is running."""
+    entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+    while True:
+        time.sleep(10)
+        try:
+            if jobqueue.listing(STATE)["jobs"] and not any(alive(r) for r in all_runs()[:20]):
+                subprocess.run([sys.executable, entry, "queue", "run-next"], capture_output=True, text=True,
+                               timeout=900, cwd=HOME)
+        except Exception as exc:  # keep the runner alive
+            print(f"queue runner: {exc}", flush=True)
+
+
+def reaper():
+    while True:
+        time.sleep(30)
+        busy = max(last_busy, last_poll)
+        try:
+            if jobqueue.listing(STATE)["jobs"]:
+                busy = time.time()      # stay up while jobs are waiting
+        except Exception:
+            pass
+        if time.time() - busy > IDLE_EXIT:
+            os._exit(0)
+
+
+def main():
+    args = sys.argv[1:]
+    if "-h" in args or "--help" in args:
+        print(__doc__.strip()); return
+    if "--stop" in args:
+        print("stopped" if get("api/stop") else "not running"); return
+    want_open = "--no-open" not in args
+
+    running = get("api/watched")
+    if running is not None:
+        # Already serving. Only open a tab if nobody is looking at one.
+        if want_open and not running.get("watched"):
+            open_browser()
+        else:
+            print(f"visualizer: {URL}")
+        return
+
+    try:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError as e:
+        print(f"visualizer could not start on port {PORT}: {e}", file=sys.stderr); sys.exit(1)
+    threading.Thread(target=reaper, daemon=True).start()
+    threading.Thread(target=queue_runner, daemon=True).start()
+    if want_open:
+        threading.Timer(0.3, open_browser).start()
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

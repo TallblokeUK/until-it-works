@@ -1,0 +1,916 @@
+import json
+import subprocess
+import sys
+import glob
+import os
+import tempfile
+import unittest
+
+from helpers import make_repo, sh, write
+
+from mp_agent import gitops, planner
+from mp_agent.contract import Contract, Decisions
+from mp_agent.progress import Progress
+from mp_agent.providers import Pacer, Reply, Retrying, tagged, verdict
+from mp_agent.waves import CycleError, waves
+
+
+class GitOps(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="mp-home-")
+
+    def test_new_folder_gets_git(self):
+        folder = os.path.join(self.home, "fresh")
+        repo = gitops.setup_project(folder, "t", home=self.home, say=lambda *_: None)
+        self.assertEqual(os.path.realpath(repo), os.path.realpath(folder))
+        with open(os.path.join(repo, ".gitignore")) as fh:
+            self.assertIn("__pycache__/", fh.read())
+        self.assertTrue(gitops.has_commits(repo))
+
+    def test_no_folder_creates_one_under_projects(self):
+        repo = gitops.setup_project(None, "Build a CSV tool", home=self.home, say=lambda *_: None)
+        self.assertIn(os.path.join("mp-projects", "build-a-csv-tool"), repo)
+
+    def test_loose_files_need_init(self):
+        folder = os.path.join(self.home, "loose")
+        write(folder, "notes.txt", "hi")
+        with self.assertRaises(gitops.SetupError):
+            gitops.setup_project(folder, "t", home=self.home, say=lambda *_: None)
+        repo = gitops.setup_project(folder, "t", init=True, home=self.home, say=lambda *_: None)
+        self.assertIn("notes.txt", sh(repo, "git", "ls-files"))
+
+    def test_refuses_home_and_dirty(self):
+        with self.assertRaises(gitops.SetupError):
+            gitops.setup_project(self.home, "t", home=self.home, say=lambda *_: None)
+        repo = make_repo({"a.txt": "a"})
+        write(repo, "a.txt", "changed")
+        with self.assertRaises(gitops.SetupError):
+            gitops.setup_project(repo, "t", home=self.home, say=lambda *_: None)
+
+    def test_snapshot_restore_including_binary_and_new_files(self):
+        repo = make_repo({"a.txt": "a\n", "b.bin": "x"})
+        write(repo, "a.txt", "implementer\n")
+        with open(os.path.join(repo, "b.bin"), "wb") as fh:
+            fh.write(b"\x00\x01\x02")
+        write(repo, "c.txt", "new\n")
+        snap = gitops.snapshot(repo)
+        write(repo, "a.txt", "reviewer vandalism\n")
+        os.remove(os.path.join(repo, "c.txt"))
+        write(repo, "d.txt", "junk")
+        self.assertTrue(gitops.restore(repo, snap))
+        self.assertEqual(gitops.snapshot(repo), snap)
+        self.assertFalse(gitops.restore(repo, snap))
+        write(repo, "__pycache__/x.cpython-314.pyc", "cache")   # running tests is not a change
+        self.assertEqual(gitops.snapshot(repo), snap)
+        self.assertFalse(gitops.restore(repo, snap))
+
+    def test_cache_files_do_not_make_a_repo_dirty(self):
+        repo = make_repo({"calc.py": "a"})
+        write(repo, "__pycache__/calc.cpython-314.pyc", "cache")
+        self.assertFalse(gitops.is_dirty(repo))
+        write(repo, "calc.py", "b")
+        self.assertTrue(gitops.is_dirty(repo))
+
+    def test_cache_files_are_never_committed(self):
+        repo = make_repo({"calc.py": "a"})
+        write(repo, "calc.py", "b")
+        write(repo, "__pycache__/calc.cpython-314.pyc", "cache")
+        write(repo, "pkg/__pycache__/x.cpython-314.pyc", "cache")
+        gitops.commit_all(repo, "work")
+        committed = sh(repo, "git", "show", "--name-only", "--format=", "HEAD").split()
+        self.assertEqual(committed, ["calc.py"])
+
+    def test_ownership(self):
+        repo = make_repo({"src/a.py": "a", "tests/t.py": "t"})
+        write(repo, "src/a.py", "changed")
+        write(repo, "src/new.py", "new")
+        write(repo, "other.py", "nope")
+        write(repo, "tests/t.py", "weakened")
+        write(repo, "tests/__pycache__/t.cpython-314.pyc", "junk")
+        write(repo, "src/__pycache__/a.cpython-314.pyc", "junk")
+        bad = gitops.ownership_violations(repo, ["src/"], ["tests/t.py"])
+        self.assertEqual(sorted(bad), ["other.py", "tests/t.py"])
+        gitops.revert_paths(repo, bad)
+        self.assertEqual(sorted(p for p in gitops.changed_files(repo) if not gitops.is_junk(p)),
+                         ["src/a.py", "src/new.py"])
+        self.assertFalse(os.path.exists(os.path.join(repo, "other.py")))
+
+
+class Plans(unittest.TestCase):
+    def plan(self, **over):
+        base = {"mode": "swarm", "contract": {"done": ["x"]}, "check": "true", "tests": None,
+                "subtasks": [{"id": "a", "goal": "g", "owns": ["a.py"], "done": ["a"]},
+                             {"id": "b", "goal": "g", "owns": ["b/"], "done": ["b"], "depends_on": ["a"]}]}
+        base.update(over)
+        return base
+
+    def test_valid(self):
+        self.assertEqual(planner.validate(self.plan(), make_repo()), [])
+
+    def test_overlap_cycle_and_frozen_tests(self):
+        repo = make_repo()
+        p = self.plan(subtasks=[{"id": "a", "goal": "g", "owns": ["b/x.py"], "done": ["a"], "depends_on": ["b"]},
+                                {"id": "b", "goal": "g", "owns": ["b/"], "done": ["b"], "depends_on": ["a"]}])
+        errors = " ".join(planner.validate(p, repo))
+        self.assertIn("both own", errors)
+        p = self.plan(tests={"goal": "t", "files": ["b/test_b.py"]})
+        self.assertIn("frozen tests file", " ".join(planner.validate(p, repo)))
+        p = self.plan(subtasks=[{"id": "a", "goal": "g", "owns": ["a.py"], "done": ["a"], "depends_on": ["b"]},
+                                {"id": "b", "goal": "g", "owns": ["b.py"], "done": ["b"], "depends_on": ["a"]}])
+        self.assertIn("cycle", " ".join(planner.validate(p, repo)))
+
+    def test_missing_check_script_must_be_in_tests(self):
+        repo = make_repo()
+        p = self.plan(mode="single", check="./agent-check.sh")
+        self.assertIn("does not exist", " ".join(planner.validate(p, repo)))
+        p["tests"] = {"goal": "t", "files": ["agent-check.sh", "test_x.py"]}
+        self.assertEqual(planner.validate(p, repo), [])
+
+    def test_extract_json(self):
+        self.assertEqual(planner.extract_json('blah\n```json\n{"a": 1}\n```'), {"a": 1})
+        self.assertIsNone(planner.extract_json("no json here"))
+
+    def test_waves(self):
+        self.assertEqual(waves([{"id": "c", "depends_on": ["a", "b"]}, {"id": "a"}, {"id": "b"}]),
+                         [["a", "b"], ["c"]])
+        with self.assertRaises(CycleError):
+            waves([{"id": "a", "depends_on": ["b"]}, {"id": "b", "depends_on": ["a"]}])
+
+
+class Parsing(unittest.TestCase):
+    def test_verdict_takes_last_and_tolerates_markdown(self):
+        self.assertEqual(verdict("VERDICT: CHANGES REQUIRED\n...\n**VERDICT: APPROVED**"), "APPROVED")
+        self.assertIsNone(verdict("I think it is fine"))
+
+    def test_ambiguity_none_is_not_a_question(self):
+        from mp_agent.gates import open_questions
+        text = "AMBIGUITY: none — the contract is fully satisfied\n**AMBIGUITY:** N/A\nAMBIGUITY: is 0 a valid id?"
+        self.assertEqual(open_questions(text), ["is 0 a valid id?"])
+
+    def test_tagged(self):
+        text = "summary\n- DECISION: rejected spaces inside a part\nDECLINE: unicode — O2\n"
+        self.assertEqual(tagged(text, "DECISION"), ["rejected spaces inside a part"])
+        self.assertEqual(tagged(text, "DECLINE"), ["unicode — O2"])
+
+    def test_contract_and_decisions_render(self):
+        c = Contract(["parses 1h30m"], ["unicode digits"])
+        self.assertEqual(c.amend("spaces inside a part are rejected"), "A1")
+        text = c.render()
+        self.assertIn("C1: parses 1h30m", text)
+        self.assertIn("O1: unicode digits", text)
+        self.assertIn("A1: spaces inside a part are rejected", text)
+        d = Decisions()
+        d.add("kept regex", "main")
+        self.assertIn("D1 (decided): kept regex", d.render("main"))
+
+
+class ProgressTests(unittest.TestCase):
+    def test_no_change(self):
+        p = Progress(patience=2, churn=99)
+        for h in ["a", "a", "a"]:
+            p.record_tree(h)
+        self.assertIn("changed nothing", p.reason())
+
+    def test_revisit(self):
+        p = Progress(patience=9, churn=99)
+        for h in ["a", "b", "a", "b"]:
+            p.record_tree(h)
+        self.assertIn("returning", p.reason())
+
+    def test_churn_and_reset(self):
+        p = Progress(patience=9, churn=3)
+        for i in range(3):
+            p.record_tree(str(i))
+            p.round_failed()
+        self.assertIn("without approval", p.reason())
+        p.reset()
+        self.assertIsNone(p.reason())
+
+
+class Classification(unittest.TestCase):
+    def test_real_error_strings(self):
+        from mp_agent.providers import classify, error_line
+        self.assertEqual(classify(1, "Error: Rate limit reached: input token limit exceeded"), "rate")
+        self.assertEqual(classify(1, "error: The server had an error while processing your request."), "transient")
+        self.assertEqual(classify(1, "Credit balance is too low"), "fatal")
+        self.assertEqual(classify(1, "Claude AI usage limit reached|1789500000"), "fatal")
+        self.assertEqual(classify(1, "You've hit your usage limit. Visit chatgpt.com/codex/settings/usage to "
+                                     "purchase more credits or try again at Sep 19th, 2026 6:05 PM."), "fatal")
+        self.assertEqual(classify(127, ""), "missing")
+        self.assertEqual(classify(124, "..."), "timeout")
+        self.assertEqual(classify(1, "AssertionError: 401 != 200"), "failed")
+        self.assertEqual(error_line("working...\nerror: hook dispatch failed\nError: Rate limit reached\ndone"),
+                         "Error: Rate limit reached")
+
+    def test_fatal_is_not_retried(self):
+        calls = []
+
+        class Broke:
+            name = pace_key = "broke"
+
+            def ask(self, *a):
+                calls.append(1)
+                return Reply("Credit balance is too low", 1)
+
+        said = []
+        agent = Retrying(Broke(), Pacer(tempfile.mkdtemp(), 0), said.append, sleep=lambda *_: None)
+        self.assertFalse(agent.ask("s", "p", "/tmp").ok)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("cannot continue", said[0])
+
+
+class Costs(unittest.TestCase):
+    def test_usage_counts_only_this_runs_sessions_and_splits_by_billing(self):
+        import json as j
+        from mp_agent.providers import Usage, cost_line, summarize_costs
+        root = tempfile.mkdtemp()
+        for sid, cwd, costs in [("a", "/trees/run1", [0.001, 0.002]), ("b", "/trees/run1-reader", [0.004]),
+                                ("c", "/trees/run2", [9.0])]:
+            os.makedirs(os.path.join(root, sid))
+            with open(os.path.join(root, sid, f"{sid}.json"), "w") as fh:
+                j.dump({"cwd": cwd, "provider": "inception", "model": "mercury-2.5"}, fh)
+            with open(os.path.join(root, sid, f"{sid}.messages.json"), "w") as fh:
+                j.dump({"messages": [{"metrics": {"cost": c}} for c in costs]}, fh)
+        tracker = Usage(lambda totals: None, "/trees/run1", 0, sessions=root)
+        tracker.add({"claude-opus-5": {"usd": 0.5}}, "subscription")
+        tracker.add({"llama3": {"usd": 0.0}}, "local")
+        tracker.refresh(force=True)
+        costs = summarize_costs(tracker.totals())
+        self.assertAlmostEqual(costs["billed_usd"], 0.007)
+        self.assertAlmostEqual(costs["subscription_usd"], 0.5)
+        self.assertEqual(costs["by_model"]["llama3"]["billing"], "local")
+        line = cost_line(costs)
+        self.assertIn("$0.007 billed to API keys (inception/mercury-2.5 $0.007)", line)
+        self.assertIn("$0.50 API-equivalent on subscriptions, not billed (claude-opus-5)", line)
+        # records written before billing was tracked: only Claude was on a subscription
+        self.assertEqual(summarize_costs({"claude-sonnet-5": {"usd": 1.0}, "x/y": {"usd": 2.0}})["billed_usd"], 2.0)
+
+
+class TokenUsage(unittest.TestCase):
+    def test_cline_usage_per_model_and_claude_reports_add_up(self):
+        import json as j
+        from mp_agent.providers import Usage, cline_usage
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, "s1"))
+        with open(os.path.join(root, "s1", "s1.json"), "w") as fh:
+            j.dump({"cwd": "/trees/run1", "provider": "inception", "model": "mercury-2.5"}, fh)
+        with open(os.path.join(root, "s1", "s1.messages.json"), "w") as fh:
+            j.dump({"messages": [
+                {"modelInfo": {"id": "mercury-2.5", "provider": "inception"},
+                 "metrics": {"inputTokens": 100, "outputTokens": 10, "cacheReadTokens": 5, "cost": 0.001}},
+                {"modelInfo": {"id": "mercury-2.5", "provider": "inception"},
+                 "metrics": {"inputTokens": 50, "outputTokens": 5, "cost": 0.0005}}]}, fh)
+        usage = cline_usage("/trees/run1", 0, sessions=root)
+        self.assertEqual(usage["inception/mercury-2.5"]["calls"], 1)
+        self.assertEqual(usage["inception/mercury-2.5"]["input"], 150)
+        written = []
+        tracker = Usage(written.append, "/trees/run1", 0, sessions=root)
+        tracker.add({"claude-sonnet-5": {"input": 2, "output": 14, "cache_read": 18531, "cache_write": 22597,
+                                         "usd": 0.094}})
+        tracker.refresh(force=True)
+        totals = written[-1]
+        self.assertEqual(totals["claude-sonnet-5"]["cache_write"], 22597)
+        self.assertEqual(totals["inception/mercury-2.5"]["output"], 15)
+
+
+class ModelChoice(unittest.TestCase):
+    OPTIONS = [{"spec": "claude:opus", "label": "Claude Opus (Claude Code, Max plan)"},
+               {"spec": "claude:sonnet", "label": "Claude Sonnet (Claude Code, Max plan)"},
+               {"spec": "codex:gpt-5.5", "label": "GPT-5.5 (Codex)"},
+               {"spec": "codex:gpt-5.6-sol", "label": "GPT-5.6-Sol (Codex)"},
+               {"spec": "qwen:deepseek-v4-pro", "label": "DeepSeek V4 Pro (Qwen Code)"},
+               {"spec": "cline:inception:mercury-2.5", "label": "Mercury 2.5 (Cline, inception)"}]
+
+    def test_panel_size_and_panel_model_are_separate_flags(self):
+        from mp_agent import cli
+        args = cli.parser().parse_args(["--panel", "1", "--panel-model", "haiku", "--reviewer", "same", "a task"])
+        self.assertEqual(args.panel, 1)
+        self.assertEqual(cli.given_roles(args), {"reviewer": "same", "panel": "haiku"})
+
+    def test_short_names_resolve_and_ambiguity_is_refused(self):
+        from mp_agent import models
+        with_antigravity = self.OPTIONS + [{"spec": "antigravity:claude-opus-4-6-thinking",
+                                            "label": "Claude Opus 4.6 (Thinking) (Antigravity)"}]
+        self.assertEqual(models.resolve("opus", with_antigravity), "claude:opus")
+        self.assertEqual(models.resolve("opus", self.OPTIONS), "claude:opus")
+        self.assertEqual(models.resolve("GPT-5.5", self.OPTIONS), "codex:gpt-5.5")
+        self.assertEqual(models.resolve("deepseek pro", self.OPTIONS), "qwen:deepseek-v4-pro")
+        with self.assertRaisesRegex(models.ChoiceError, "could mean"):
+            models.resolve("gpt", self.OPTIONS)
+        with self.assertRaisesRegex(models.ChoiceError, "no available model"):
+            models.resolve("llama", self.OPTIONS)
+
+    def test_judge_and_planner_must_not_be_the_worker(self):
+        from mp_agent import models
+        self.assertTrue(models.check_independent({"worker": "claude:opus", "planner": "claude:opus",
+                                                  "judge": "codex:gpt-5.5"}))
+        self.assertFalse(models.check_independent({"worker": "cline:inception:mercury-2.5",
+                                                   "planner": "claude:sonnet", "judge": "claude:opus"}))
+
+    def test_config_round_trip_keeps_defaults(self):
+        from mp_agent import models
+        state = tempfile.mkdtemp()
+        self.assertEqual(models.load_config(state), models.BUILTIN)
+        models.save_config(state, {"judge": "claude:opus", "reviewer": "claude:haiku"})
+        self.assertEqual(models.load_config(state)["judge"], "claude:opus")
+        self.assertEqual(models.load_config(state)["worker"], models.BUILTIN["worker"])
+        self.assertEqual(models.effective(models.load_config(state))["panel"], models.BUILTIN["worker"])
+        models.save_config(state, {"reviewer": ""})
+        self.assertEqual(models.load_config(state)["reviewer"], "")
+
+    def test_presets_pick_from_what_is_available_and_keep_the_judge_independent(self):
+        from mp_agent import models
+        found = {p["id"]: p for p in models.presets(self.OPTIONS + [{"spec": "codex:gpt-5.6-luna", "label": "Luna"},
+                                                                     {"spec": "claude:haiku", "label": "Haiku"}])}
+        self.assertEqual(found["fast"]["roles"]["worker"], "cline:inception:mercury-2.5")
+        self.assertEqual(found["mixed"]["roles"]["worker"], "codex:gpt-5.6-luna")
+        self.assertEqual(found["mixed"]["roles"]["planner"], "claude:opus")
+        openai = found["openai"]["roles"]
+        self.assertEqual(openai["worker"], "codex:gpt-5.6-luna")
+        self.assertNotEqual(openai["judge"], openai["worker"])
+        self.assertEqual(found["claude"]["roles"]["reviewer"], "claude:haiku")
+        only_claude = {p["id"]: p for p in models.presets([o for o in self.OPTIONS if o["spec"].startswith("claude")])}
+        self.assertIsNone(only_claude["fast"]["roles"])
+        self.assertIn("a worker", only_claude["fast"]["missing"][0])
+        state = tempfile.mkdtemp()
+        roles, problem = models.apply_preset(state, "fast", self.OPTIONS)
+        self.assertIsNone(problem)
+        self.assertEqual(models.load_tuning(state)["panel_size"], 3)
+        _, problem = models.apply_preset(state, "claude", self.OPTIONS)       # no haiku here: reviewer falls back
+        self.assertIsNone(problem)
+        self.assertEqual(models.load_config(state)["reviewer"], "")
+        self.assertEqual(models.load_tuning(state)["panel_size"], 1)
+        self.assertIn("needs", models.apply_preset(state, "fast", self.OPTIONS[:2])[1])
+
+    def test_opencode_adapter_reads_its_json_events(self):
+        import json as j
+        import stat
+        from unittest import mock
+        from mp_agent.providers import make_agent
+        bin_dir, seen = tempfile.mkdtemp(), tempfile.mktemp()
+        fake = os.path.join(bin_dir, "opencode")
+        events = [{"type": "step_start", "part": {}},
+                  {"type": "tool_use", "part": {"tool": "read", "state": {"input": {"filePath": "a.py"}}}},
+                  {"type": "text", "part": {"text": "Looks right."}},
+                  {"type": "text", "part": {"text": "VERDICT: APPROVED"}},
+                  {"type": "step_finish", "part": {"cost": 0.002, "tokens": {"input": 120, "output": 30, "reasoning": 5,
+                                                                             "cache": {"read": 40, "write": 0}}}}]
+        with open(fake, "w") as fh:
+            fh.write("#!/bin/sh\n"
+                     f"printf '%s\\n' \"$@\" > {seen}\n"
+                     f"echo \"CONFIG=$OPENCODE_CONFIG_CONTENT\" >> {seen}\n"
+                     + "".join(f"echo '{j.dumps(e)}'\n" for e in events))
+        os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+        with mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}):
+            judge = make_agent("opencode:ollama/qwen3")
+            reply = judge.ask("SYSTEM", "PROMPT", tempfile.mkdtemp())
+            with open(seen) as fh:
+                judge_args = fh.read()
+            worker = make_agent("opencode:openrouter/qwen/qwen3-coder", worker=True)
+            worker.ask("SYSTEM", "PROMPT", tempfile.mkdtemp())
+            with open(seen) as fh:
+                worker_args = fh.read()
+        self.assertTrue(reply.ok)
+        self.assertEqual(reply.text, "Looks right.\nVERDICT: APPROVED")
+        self.assertEqual(reply.usage["ollama/qwen3"]["output"], 35)
+        self.assertEqual(judge.billing, "local")
+        self.assertEqual(worker.billing, "api")
+        self.assertIn('"edit": "deny"', judge_args)
+        self.assertNotIn("--auto", judge_args)
+        self.assertIn("--auto", worker_args)
+        self.assertIn("openrouter/qwen/qwen3-coder", worker_args)
+
+    def test_worker_and_judge_get_different_permissions(self):
+        from mp_agent.providers import make_agent
+        self.assertIn("Edit", make_agent("claude:haiku", worker=True).tools)
+        self.assertNotIn("Edit", make_agent("claude:opus").tools)
+        self.assertTrue(make_agent("codex:gpt-5.5", worker=True).worker)
+        self.assertFalse(make_agent("codex:gpt-5.5").worker)
+
+
+class Antigravity(unittest.TestCase):
+    def test_json_status_decides_and_quota_is_fatal(self):
+        from unittest import mock
+        from mp_agent import providers
+        ok = providers.Reply('{"status":"SUCCESS","response":"fine\\nVERDICT: APPROVED",'
+                             '"usage":{"input_tokens":10,"output_tokens":2,"thinking_tokens":1}}', 0, 1.0)
+        quota = providers.Reply('{"status":"ERROR","response":"","error":"API error: RESOURCE_EXHAUSTED (code 429): '
+                                'Individual quota reached. Please upgrade your subscription."}', 0, 1.0)
+        agent = providers.make_agent("antigravity:gemini-3.1-pro-high")
+        with mock.patch.object(providers, "run_cli", return_value=ok) as run:
+            reply = agent.ask("system", "prompt", "/tmp/project")
+            cmd = run.call_args[0][0]
+        self.assertEqual(providers.verdict(reply.text), "APPROVED")
+        self.assertEqual(reply.usage["gemini-3.1-pro-high"]["output"], 3)
+        self.assertIn("plan", cmd)
+        self.assertIn("/tmp/project", cmd)
+        with mock.patch.object(providers, "run_cli", return_value=quota):
+            reply = agent.ask("system", "prompt", "/tmp/project")
+        self.assertFalse(reply.ok)
+        self.assertEqual(providers.classify(reply.status, reply.text), "fatal")
+        worker = providers.make_agent("antigravity:gpt-oss-120b-medium", worker=True)
+        with mock.patch.object(providers, "run_cli", return_value=ok) as run:
+            worker.ask("system", "prompt", "/tmp/project")
+            self.assertIn("--dangerously-skip-permissions", run.call_args[0][0])
+
+
+class ToolActivity(unittest.TestCase):
+    def test_categories_and_details(self):
+        from mp_agent.providers import activity_detail, categorize
+        self.assertEqual(categorize("context7__query-docs"), "docs")
+        self.assertEqual(categorize("mcp__context7__resolve-library-id"), "docs")
+        self.assertEqual(categorize("playwright__browser_navigate"), "browser")
+        self.assertEqual(categorize("fetch_web_content"), "web")
+        self.assertEqual(categorize("read_files"), "files")
+        self.assertEqual(categorize("run_commands"), "terminal")
+        self.assertEqual(categorize("editor"), "edit")
+        self.assertEqual(activity_detail('{"query":"GET route","libraryName":"FastAPI"}'), "FastAPI")
+        self.assertEqual(activity_detail('{"url":"https://example.com"}'), "https://example.com")
+
+    def test_cline_tool_lines_are_reported_for_the_calling_actor(self):
+        from unittest import mock
+        from mp_agent import providers
+        events = []
+        agent = providers.make_agent("cline:inception:mercury-2.5")
+        agent.on_activity = events.append
+
+        def fake_run(cmd, cwd, timeout, stdin_text=None, env=None, on_line=None):
+            for line in ["thinking...", '[context7__resolve-library-id] {"libraryName":"FastAPI"}',
+                         '[playwright__browser_navigate] {"url":"https://example.com"}', "done"]:
+                on_line(line)
+            return providers.Reply("done", 0, 1.0)
+
+        with mock.patch.object(providers, "run_cli", side_effect=fake_run), providers.acting("reviewer", "reader"):
+            agent.ask("s", "p", "/tmp")
+        self.assertEqual([(e["role"], e["unit"], e["category"], e["detail"]) for e in events],
+                         [("reviewer", "reader", "docs", "FastAPI"), ("reviewer", "reader", "browser", "https://example.com")])
+
+    def test_claude_loads_only_our_mcp_servers(self):
+        from unittest import mock
+        from mp_agent import providers
+        path = os.path.join(tempfile.mkdtemp(), "mcp.json")
+        with open(path, "w") as fh:
+            fh.write("{}")
+        agent = providers.make_agent("claude:opus", mcp_config=path)
+        result = '{"type":"result","result":"VERDICT: APPROVED","total_cost_usd":0.1,"modelUsage":{}}'
+        with mock.patch.object(providers, "run_cli", return_value=providers.Reply(result, 0, 1.0)) as run:
+            reply = agent.ask("s", "p", "/tmp")
+            cmd = run.call_args[0][0]
+        self.assertIn("--strict-mcp-config", cmd)
+        self.assertEqual(cmd[cmd.index("--mcp-config") + 1], path)
+        self.assertEqual(reply.text, "VERDICT: APPROVED")
+
+
+class Places(unittest.TestCase):
+    def test_local_repos_found_newest_first_and_github_names_parsed(self):
+        from mp_agent import where
+        home = tempfile.mkdtemp(prefix="mp-home-")
+        for name, remote in (("alpha", "git@github.com:someone/alpha.git"), ("work/beta", "https://github.com/keepout/beta"),
+                             (".hidden/gamma", "")):
+            path = os.path.join(home, name)
+            os.makedirs(path)
+            sh(path, "git", "init", "-q", "-b", "main")
+            if remote:
+                sh(path, "git", "remote", "add", "origin", remote)
+            write(path, "f.txt", name)
+            sh(path, "git", "add", "-A")
+            sh(path, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c")
+        write(os.path.join(home, "alpha"), "f.txt", "changed")
+        state = tempfile.mkdtemp(prefix="mp-state-")
+        write(state, "config.json", json.dumps({"protected": ["KeepOut"]}))
+        repos = where.local_repos(home, state_dir=state)
+        names = [r["name"] for r in repos]
+        self.assertIn("alpha", names)
+        self.assertIn(os.path.join("work", "beta"), names)
+        self.assertNotIn(os.path.join(".hidden", "gamma"), names)
+        alpha = next(r for r in repos if r["name"] == "alpha")
+        beta = next(r for r in repos if r["name"].endswith("beta"))
+        self.assertTrue(alpha["dirty"])
+        self.assertEqual(alpha["github"], "someone/alpha")
+        self.assertFalse(alpha["protected"])
+        self.assertTrue(beta["protected"])
+        self.assertEqual(where.find_clone("someone/alpha", home)["name"], "alpha")
+        with self.assertRaises(gitops.SetupError):
+            where.prepare_github("not a repo name", home)
+
+
+class QueueAndHistory(unittest.TestCase):
+    def test_queue_order_remove_and_history(self):
+        from mp_agent import jobqueue
+        state = tempfile.mkdtemp()
+        a = jobqueue.add(state, "first task", ["--new"])
+        b = jobqueue.add(state, "second task", ["--repo", "/x"])
+        c = jobqueue.add(state, "third task", ["--oneoff"])
+        self.assertTrue(jobqueue.remove(state, b["id"]))
+        self.assertEqual(jobqueue.take_next(state)["id"], a["id"])
+        jobqueue.record(state, a, "Started: first task", "/runs/1")
+        data = jobqueue.listing(state)
+        self.assertEqual([j["id"] for j in data["jobs"]], [c["id"]])
+        self.assertEqual(data["history"][0]["run"], "/runs/1")
+
+    def test_history_counts_gates_and_projects(self):
+        import json as j
+        from mp_agent import history
+        runs = tempfile.mkdtemp()
+        run = os.path.join(runs, "20260915T000000Z-x")
+        os.makedirs(run)
+        with open(os.path.join(run, "plan.json"), "w") as fh:
+            j.dump({"mode": "single"}, fh)
+        with open(os.path.join(run, "metadata.json"), "w") as fh:
+            j.dump({"approved": True, "project": "/p/demo", "seconds": 60, "costs": {"mercury_usd": 0.01},
+                    "units": {"main": {"passes": 2}}, "task": "t"}, fh)
+        with open(os.path.join(run, "run.log"), "w") as fh:
+            fh.write("── pass 1\n   panel edges: objected\n   panel asked for changes\n── pass 2\n"
+                     "   panel approved\n   final reviewer asked for changes\n")
+        s = history.summarize(runs)
+        self.assertEqual(s["gates"]["panel_objections"], 1)
+        self.assertEqual(s["gates"]["judge_after_panel"], 1)
+        self.assertEqual(s["lenses"], {"edges": 1})
+        self.assertEqual(s["projects"][0]["project"], "demo")
+
+
+class StartArguments(unittest.TestCase):
+    def test_start_keeps_the_spending_cap_out_of_the_task(self):
+        from unittest import mock
+        from mp_agent import cli
+        home = tempfile.mkdtemp(prefix="mp-home-")
+        launched = {}
+
+        def fake_launch(command, cwd):
+            launched["command"] = command
+            return "/runs/x"
+
+        with mock.patch.object(cli, "HOME", home), mock.patch.object(cli, "launch", side_effect=fake_launch), \
+                mock.patch.object(cli, "choose_models", return_value=({"worker": "w", "planner": "p", "judge": "j", "reviewer": "", "panel": "r"}, [], None)), \
+                mock.patch("sys.stdin") as stdin:
+            stdin.isatty.return_value = False
+            stdin.read.return_value = "Create notes.txt containing the word hello."
+            self.assertEqual(cli.start(["--oneoff", "--name", "cap-test", "--max-usd", "0.001"]), 0)
+        command = launched["command"]
+        self.assertEqual(command[-1], "Create notes.txt containing the word hello.")
+        self.assertEqual(command[command.index("--max-usd") + 1], "0.001")
+        self.assertEqual(command[command.index("--reviewer") + 1], "same")
+        self.assertEqual(command[command.index("--panel-model") + 1], "r")
+        # a flag start does not know is passed on whole, never read as the start of --panel-model
+        with mock.patch.object(cli, "HOME", home), mock.patch.object(cli, "launch", side_effect=fake_launch), \
+                mock.patch.object(cli, "choose_models", return_value=({"worker": "w", "planner": "p", "judge": "j", "reviewer": "", "panel": ""}, [], None)) as chose, \
+                mock.patch("sys.stdin") as stdin:
+            stdin.isatty.return_value = False
+            stdin.read.return_value = "Create notes.txt containing the word hello."
+            self.assertEqual(cli.start(["--oneoff", "--name", "panel-test", "--panel", "1"]), 0)
+        self.assertEqual(chose.call_args[0][0], {})
+        command = launched["command"]
+        self.assertEqual(command[command.index("--panel") + 1], "1")
+
+
+class Tidy(unittest.TestCase):
+    def test_plans_then_tidies_only_leftovers_and_archives_runs(self):
+        import json as j
+        from mp_agent import tidy
+        state = tempfile.mkdtemp(prefix="mp-state-")
+        project = make_repo({"a.txt": "a"})
+        for name, repo in (("20260915T000001Z-gone", "/nonexistent/project"), ("20260915T000002Z-here", project)):
+            run = os.path.join(state, "runs", name)
+            os.makedirs(run)
+            with open(os.path.join(run, "repo"), "w") as fh:
+                fh.write(repo)
+        os.makedirs(os.path.join(state, "projects", "gone-1"))
+        with open(os.path.join(state, "projects", "gone-1", "memory.md"), "w") as fh:
+            fh.write("# What mp-agent runs have settled for /nonexistent/project\n")
+        os.makedirs(os.path.join(state, "shots"))
+        old_shot = os.path.join(state, "shots", "page-old.png")
+        open(old_shot, "w").close()
+        os.utime(old_shot, (0, 0))
+        open(os.path.join(state, "shots", "page-new.png"), "w").close()
+        with open(os.path.join(state, "queue.json"), "w") as fh:
+            j.dump({"jobs": [{"id": "x"}], "history": [{"label": "done"}]}, fh)
+
+        items = {i["id"]: i for i in tidy.plan(state)["items"]}
+        self.assertEqual(items["orphan_runs"]["count"], 1)
+        self.assertEqual(items["memories"]["count"], 1)
+        self.assertEqual(items["shots"]["count"], 1)
+        self.assertTrue(os.path.isdir(os.path.join(state, "runs", "20260915T000001Z-gone")))   # planning changes nothing
+
+        tidy.apply(state, ["orphan_runs", "memories", "shots", "queue_history"])
+        self.assertFalse(os.path.exists(os.path.join(state, "runs", "20260915T000001Z-gone")))
+        self.assertTrue(os.path.isdir(os.path.join(state, "runs", "20260915T000002Z-here")))
+        archived = glob.glob(os.path.join(state, "runs-archive-*", "20260915T000001Z-gone"))
+        self.assertEqual(len(archived), 1)
+        self.assertFalse(os.path.exists(os.path.join(state, "projects", "gone-1")))
+        self.assertTrue(os.path.exists(os.path.join(state, "shots", "page-new.png")))
+        with open(os.path.join(state, "queue.json")) as fh:
+            q = j.load(fh)
+        self.assertEqual((len(q["jobs"]), len(q["history"])), (1, 0))       # waiting jobs are never touched
+        self.assertTrue(os.path.isdir(project))                               # projects are never touched
+
+
+class Pacing(unittest.TestCase):
+    def test_learns_from_refusals_and_recovers(self):
+        pacer = Pacer(tempfile.mkdtemp(), floor=3)
+        self.assertEqual(pacer.interval("inception"), 3)
+        self.assertEqual(pacer.refused("inception"), 20)
+        self.assertEqual(pacer.refused("inception"), 40)
+        for _ in range(Pacer.NARROW_AFTER):
+            pacer.succeeded("inception")
+        self.assertEqual(pacer.interval("inception"), 30)
+        other = Pacer(pacer.directory, floor=3)          # a separate run shares what was learned
+        self.assertEqual(other.interval("inception"), 30)
+        self.assertEqual(other.interval("claude"), 3)    # providers are separate
+
+    def test_waits_are_recorded(self):
+        waited = []
+        pacer = Pacer(tempfile.mkdtemp(), floor=0.3, record=waited.append)
+        pacer.wait_turn("k")
+        pacer.wait_turn("k")
+        self.assertEqual(len(waited), 1)
+        self.assertGreater(waited[0], 0.1)
+
+
+class Retries(unittest.TestCase):
+    def test_transient_rate_and_missing_cli_are_retried(self):
+        replies = [Reply("error: The server had an error while processing your request.", 1),
+                   Reply("Rate limit reached: input token limit exceeded", 1),
+                   Reply("", 127),
+                   Reply("fine", 0)]
+
+        class Flaky:
+            name = pace_key = "flaky"
+
+            def ask(self, *a):
+                return replies.pop(0)
+
+        said, slept = [], []
+        agent = Retrying(Flaky(), Pacer(tempfile.mkdtemp(), 0, sleep=lambda *_: None), said.append, retries=4,
+                         sleep=slept.append)
+        self.assertTrue(agent.ask("s", "p", "/tmp").ok)
+        self.assertEqual(slept, [30, 120, 120])   # transient, then rate (2nd step), then missing (3rd step)
+        self.assertTrue(any("provider error" in s for s in said))
+
+    def test_real_failure_is_not_retried(self):
+        class Broken:
+            name = pace_key = "broken"
+            calls = 0
+
+            def ask(self, *a):
+                Broken.calls += 1
+                return Reply("TypeError: something in the model's own work", 1)
+
+        agent = Retrying(Broken(), Pacer(tempfile.mkdtemp(), 0), lambda *_: None, sleep=lambda *_: None)
+        self.assertFalse(agent.ask("s", "p", "/tmp").ok)
+        self.assertEqual(Broken.calls, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class Keys(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.state = tempfile.mkdtemp(prefix="mp-keys-")
+        self.patch = mock.patch.dict(os.environ, {"MP_KEYS_BACKEND": "file"})
+        self.patch.start()
+        for name in ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            os.environ.pop(name, None)
+
+    def tearDown(self):
+        self.patch.stop()
+
+    def test_stored_keys_are_never_shown_and_only_reach_the_environment(self):
+        import json as j
+        import stat
+        from mp_agent import keys
+        saved = keys.set_key(self.state, "openrouter", "  sk-or-v1-abcdefghij1234\n")
+        self.assertEqual(saved["last4"], "1234")
+        status = keys.status(self.state)
+        self.assertNotIn("abcdefghij", j.dumps(status))
+        self.assertTrue(next(p for p in status["providers"] if p["id"] == "openrouter")["stored"])
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.state, "keys.json")).st_mode), 0o600)
+        self.assertEqual(keys.environment(self.state), {"OPENROUTER_API_KEY": "sk-or-v1-abcdefghij1234"})
+        self.assertEqual(keys.environment(self.state, only={"google"}), {})
+        os.environ["OPENROUTER_API_KEY"] = "mine"                   # the person's own variable wins
+        self.assertEqual(keys.environment(self.state), {})
+        del os.environ["OPENROUTER_API_KEY"]
+        with self.assertRaises(keys.KeyError_):
+            keys.set_key(self.state, "openrouter", "short")
+        with self.assertRaises(keys.KeyError_):
+            keys.set_key(self.state, "nosuch", "abcdefghijklmnop")
+        self.assertTrue(keys.remove_key(self.state, "openrouter"))
+        self.assertEqual(keys.environment(self.state), {})
+        self.assertFalse(next(p for p in keys.status(self.state)["providers"] if p["id"] == "openrouter")["stored"])
+
+    def test_the_keyring_gets_the_key_on_stdin_not_the_command_line(self):
+        from unittest import mock
+        from mp_agent import keys
+        calls = []
+
+        def fake_run(cmd, stdin_text=None, timeout=15):
+            calls.append((cmd, stdin_text))
+            return subprocess.CompletedProcess(cmd, 0, "sk-secret-value-99\n" if "lookup" in cmd else "", "")
+
+        import subprocess
+        with mock.patch.object(keys, "_run", side_effect=fake_run):
+            keys.SecretService().set("openai", "sk-secret-value-99")
+            self.assertEqual(keys.SecretService().get("openai"), "sk-secret-value-99")
+            keys.MacKeychain().set("openai", 'sk-with"quote')
+        self.assertNotIn("sk-secret-value-99", " ".join(calls[0][0]))
+        self.assertEqual(calls[0][1], "sk-secret-value-99")
+        self.assertEqual(calls[2][0], ["security", "-i"])
+        self.assertIn('-w "sk-with\\"quote"', calls[2][1])
+
+    def test_claude_code_gets_a_key_only_when_api_billing_is_chosen(self):
+        from mp_agent.providers import make_agent
+        self.assertEqual(make_agent("claude:opus").billing, "subscription")
+        paid = make_agent("claude:opus", claude_api_key="sk-ant-xyz")
+        self.assertEqual((paid.billing, paid.api_key), ("api", "sk-ant-xyz"))
+        gemini = make_agent("gemini:default", key_env={"GEMINI_API_KEY": "g-key"})
+        self.assertEqual(gemini.key_env, {"GEMINI_API_KEY": "g-key"})
+
+
+class Setup(unittest.TestCase):
+    def test_scan_says_what_is_ready_and_what_to_do_next(self):
+        from unittest import mock
+        from mp_agent import models, setup
+        state = tempfile.mkdtemp(prefix="mp-setup-")
+        options = [{"spec": "claude:opus", "label": "Opus"}, {"spec": "claude:sonnet", "label": "Sonnet"},
+                   {"spec": "cline:inception:mercury-2.5", "label": "Mercury"}]
+        which = {"claude": "/bin/claude", "cline": "/bin/cline", "gemini": "/bin/gemini"}
+        with mock.patch.object(models, "available", return_value=options), \
+                mock.patch.object(setup.shutil, "which", side_effect=lambda c: which.get(c)), \
+                mock.patch.dict(os.environ, {"MP_KEYS_BACKEND": "file"}):
+            info = setup.scan(state)
+        tools = {t["id"]: t for t in info["tools"]}
+        self.assertEqual((tools["claude"]["ready"], tools["claude"]["models"]), (True, 2))
+        self.assertEqual((tools["gemini"]["installed"], tools["gemini"]["ready"]), (True, False))
+        self.assertFalse(tools["opencode"]["installed"])
+        self.assertTrue(info["ready"])
+        self.assertTrue(info["first_time"])
+        self.assertEqual([p["id"] for p in info["presets"] if p["roles"]], ["fast", "claude"])
+        models.save_config(state, {"worker": "codex:gpt-5.5"})
+        with mock.patch.object(models, "available", return_value=options), \
+                mock.patch.dict(os.environ, {"MP_KEYS_BACKEND": "file"}):
+            info = setup.scan(state)
+        self.assertFalse(info["ready"])
+        self.assertIn("the worker (codex:gpt-5.5)", info["ready_detail"])
+
+    def test_model_test_is_one_read_only_call(self):
+        from unittest import mock
+        from mp_agent import setup
+        seen = {}
+
+        class Fake:
+            def ask(self, system, prompt, cwd):
+                seen["worker"] = made["worker"]
+                return Reply("READY", 0, 0.1) if "good" in made["spec"] else Reply("Error: invalid api key", 1, 0.1)
+
+        made = {}
+
+        def fake_make(spec, timeout, worker=False, **kw):
+            made.update(spec=spec, worker=worker)
+            return Fake()
+
+        state = tempfile.mkdtemp(prefix="mp-setup-")
+        with mock.patch.object(setup, "make_agent", side_effect=fake_make), \
+                mock.patch.dict(os.environ, {"MP_KEYS_BACKEND": "file"}):
+            good = setup.test_model(state, "x:good")
+            bad = setup.test_model(state, "x:bad")
+        self.assertTrue(good["ok"])
+        self.assertFalse(seen["worker"])
+        self.assertEqual((bad["ok"], bad["kind"]), (False, "fatal"))
+        self.assertIn("invalid api key", bad["problem"])
+
+
+class WorkshopServer(unittest.TestCase):
+    def test_host_origin_and_keys_guards(self):
+        import socket
+        import subprocess
+        import time as t
+        import urllib.error
+        import urllib.request
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        home = tempfile.mkdtemp(prefix="mp-viz-home-")
+        env = {**os.environ, "MP_VIZ_PORT": str(port), "MP_HOME": home, "MP_RUNS": os.path.join(home, "runs"),
+               "MP_KEYS_BACKEND": "file"}
+        env.pop("OPENROUTER_API_KEY", None)
+        viz = os.path.join(os.path.dirname(__file__), "..", "bin", "mp-viz")
+        server = subprocess.Popen([sys.executable, viz, "--no-open"], env=env, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL)
+        base = f"http://127.0.0.1:{port}"
+
+        def call(path, body=None, headers=None):
+            data = None if body is None else json.dumps(body).encode()
+            request = urllib.request.Request(base + path, data=data, headers=headers or {})
+            try:
+                with urllib.request.urlopen(request, timeout=60) as r:
+                    return r.status, r.read().decode()
+            except urllib.error.HTTPError as exc:
+                return exc.code, exc.read().decode()
+
+        try:
+            for _ in range(50):
+                try:
+                    if call("/api/runs")[0] == 200:
+                        break
+                except OSError:
+                    t.sleep(0.1)
+            good = {"Content-Type": "application/json", "Origin": base}
+            self.assertEqual(call("/api/runs", headers={"Host": f"evil.example:{port}"})[0], 403)
+            self.assertEqual(call("/api/keys/set", {"provider": "openrouter", "key": "sk-or-abcdefgh5678"},
+                                  {**good, "Host": f"evil.example:{port}"})[0], 403)
+            self.assertEqual(call("/api/keys/set", {"provider": "openrouter", "key": "sk-or-abcdefgh5678"},
+                                  {"Content-Type": "application/json", "Origin": "https://evil.example"})[0], 403)
+            status, text = call("/api/keys/set", {"provider": "openrouter", "key": "sk-or-abcdefgh5678"}, good)
+            self.assertEqual(status, 200, text)
+            self.assertNotIn("abcdefgh", text)
+            self.assertIn("5678", text)
+            with open(os.path.join(home, "keys.json")) as fh:
+                self.assertIn("sk-or-abcdefgh5678", fh.read())
+            status, text = call("/api/setup")
+            self.assertEqual(status, 200, text)
+            self.assertNotIn("abcdefgh", text)
+            self.assertTrue(next(p for p in json.loads(text)["keys"]["providers"] if p["id"] == "openrouter")["stored"])
+            self.assertEqual(call("/api/keys/remove", {"provider": "openrouter"}, good)[0], 200)
+            self.assertEqual(call("/api/keys/set", {"provider": "../../x", "key": "abcdefghijk"}, good)[0], 400)
+        finally:
+            server.terminate()
+            server.wait(timeout=10)
+
+
+class Desktop(unittest.TestCase):
+    def test_mac_and_linux_commands(self):
+        from unittest import mock
+        from mp_agent import desktop
+        launched = []
+        with mock.patch.object(desktop, "_quiet", side_effect=lambda cmd, **kw: launched.append(cmd) or True):
+            with mock.patch.object(desktop, "MAC", True):
+                desktop.notify('Title "x"', "it's done; rm -rf /")
+                desktop.open_folder("/Users/me/project")
+            with mock.patch.object(desktop, "MAC", False):
+                desktop.notify("Title", "done")
+                desktop.open_folder("/home/me/project")
+        mac_notify, mac_open, linux_notify, linux_open = launched
+        self.assertEqual(mac_notify[0], "osascript")
+        self.assertEqual(mac_notify[-2:], ['Title "x"', "it's done; rm -rf /"])     # arguments, not script text
+        self.assertNotIn("rm -rf", " ".join(mac_notify[:-2]))
+        self.assertEqual(mac_open, ["open", "/Users/me/project"])
+        self.assertEqual(linux_notify[0], "notify-send")
+        self.assertEqual(linux_open, ["xdg-open", "/home/me/project"])
+
+    def test_screen_size_on_a_mac_and_window_size(self):
+        from unittest import mock
+        from mp_agent import desktop
+        retina = "Displays:\n  Color LCD:\n    Resolution: 3024 x 1964 Retina\n    UI Looks like: 1512 x 982 @ 120.00Hz\n"
+        external = "Displays:\n  DELL:\n    Resolution: 2560 x 1440 (QHD)\n"
+        for text, expected in ((retina, (1512, 982)), (external, (2560, 1440))):
+            with mock.patch.object(desktop, "MAC", True), \
+                    mock.patch.object(desktop.subprocess, "run",
+                                      return_value=subprocess.CompletedProcess([], 0, text, "")):
+                self.assertEqual(desktop.screen_size(), expected)
+        self.assertEqual(desktop.window_size((2560, 1440)), (2000, 1296))
+        self.assertEqual(desktop.window_size((1512, 982)), (1285, 883))
+        with mock.patch.object(desktop, "screen_size", return_value=None):
+            self.assertEqual(desktop.window_size(), (1600, 1000))
+
+    def test_command_of_a_running_process(self):
+        from mp_agent import desktop
+        self.assertIn("python", desktop.command_of(os.getpid()).lower())
+        self.assertEqual(desktop.command_of(99999999), "")
+
+
+class Launchers(unittest.TestCase):
+    def test_each_tool_gets_its_own_format_and_foreign_files_are_left_alone(self):
+        from unittest import mock
+        from mp_agent import launchers
+        claude = launchers.render("claude")
+        self.assertTrue(claude.startswith("---\ndescription: "))
+        self.assertIn("allowed-tools: Bash(mp-agent:*)", claude)
+        self.assertIn("The task is: $ARGUMENTS", claude)
+        gemini = launchers.render("gemini")
+        self.assertIn("The task is: {{args}}", gemini)
+        try:
+            import tomllib
+        except ImportError:                                  # Python before 3.11
+            tomllib = None
+        if tomllib:
+            parsed = tomllib.loads(gemini)
+            self.assertIn("mp-agent start", parsed["prompt"])
+            self.assertTrue(parsed["description"])
+        codex = launchers.render("codex")
+        self.assertIn("name: mp-agent", codex)
+        self.assertNotIn("$ARGUMENTS", codex)                # Codex skills do not substitute it
+        self.assertIn("The task is the text that follows", launchers.render("cline"))
+        home = tempfile.mkdtemp(prefix="mp-launch-")
+        os.makedirs(os.path.join(home, ".claude", "commands"))
+        os.makedirs(os.path.join(home, ".gemini"))
+        write(os.path.join(home, ".claude", "commands"), "mp-agent.md", "my own command\n")
+        with mock.patch.object(launchers.shutil, "which", return_value=None):
+            done = {tool: what for tool, _, what in launchers.install(home)}
+        self.assertIn("left alone", done["claude"])
+        self.assertEqual(done["gemini"], "installed")
+        self.assertNotIn("codex", done)                      # not installed: nothing written
+        with open(os.path.join(home, ".claude", "commands", "mp-agent.md")) as fh:
+            self.assertEqual(fh.read(), "my own command\n")
+        with mock.patch.object(launchers.shutil, "which", return_value=None):
+            self.assertEqual({t: w for t, _, w in launchers.install(home)}["gemini"], "up to date")

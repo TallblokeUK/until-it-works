@@ -1,0 +1,1076 @@
+"""mp-agent command line.
+
+    mp-agent start "task"                launch in the background (what /agents in Cline runs)
+    mp-agent [options] "task"            do a task in the foreground
+    mp-agent answer "text" [--run DIR]   answer the question a waiting run asked
+    mp-agent status [-f] [-n N]          same as mp-status
+    mp-agent clean [--yes]               remove worktrees left by finished runs (branches are kept)
+    mp-agent stop [--run DIR]            stop the running run (its work so far is kept)
+    mp-agent keep [--run DIR]            merge a finished run's branch into the project
+    mp-agent discard [--run DIR]         delete a finished run's branch
+    mp-agent selftest                    check everything works end to end (~2 minutes)
+    mp-agent resume [--run DIR]          carry on a stopped or crashed run where it left off
+    mp-agent setup [--json]              what is installed and set up, API keys, presets you can use
+    mp-agent keys list | set P | remove P   API keys, kept in the system keychain
+    mp-agent test MODEL [--json]         one tiny call, to check a model works
+    mp-agent launchers [--install]       /mp-agent in Claude Code, Codex, Gemini CLI, OpenCode, Qwen Code and Cline
+    mp-agent models [--json]             the models available for each role, the presets, the current choices
+    mp-agent where [--json] [--refresh]  where a job can run: recent local projects, GitHub repos, new, one-off
+    mp-agent pr [--run DIR] [--base BRANCH]   push a finished run's branch and open a GitHub pull request
+    mp-agent queue add [start flags] "task" | list | remove ID | run-next   jobs that run one after another
+    mp-agent history [--json]            where the time and money went, and which judges object
+    mp-agent tidy [--yes] [--all-runs]   clear mp-agent's own leftovers (never your projects or branches)
+    mp-agent config --preset P | --planner|--worker|--reviewer|--panel-model|--judge NAME | --max-usd N
+                    | --claude-billing subscription|api   change the defaults
+"""
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+from . import desktop, gitops, models, where as places
+from .context import Context, Options, notify
+from .contract import Decisions
+from .orchestrator import Orchestrator, start_visualizer
+from . import providers
+from .providers import Pacer, Retrying, make_agent
+from .runlog import Run
+
+HOME = os.path.expanduser("~")
+STATE = os.environ.get("MP_HOME", os.path.join(HOME, ".mp-agent"))
+RUNS = os.environ.get("MP_RUNS", os.path.join(STATE, "runs"))
+TREES = os.environ.get("MP_TREES", os.path.join(STATE, "worktrees"))
+PACE = os.environ.get("MP_PACE", os.path.join(STATE, "pace"))
+
+
+def env(name, default, cast=str):
+    value = os.environ.get(name)
+    return default if value in (None, "") else cast(value)
+
+
+ROLE_HELP = {
+    "planner": "who plans the work and rules on disagreements, e.g. opus",
+    "worker": "the model that does the work, e.g. mercury, sonnet, gpt-5.5",
+    "reviewer": "the quick review after each passing check ('same' = the workers' model)",
+    "panel": "the pre-audit panel ('same' = the workers' model)",
+    "judge": "the final judge, e.g. opus",
+}
+
+
+def role_dest(role):
+    """--panel is how many lenses the panel has, so the panel's model is --panel-model."""
+    return "panel_model" if role == "panel" else role
+
+
+def add_role_flags(p, from_env=False):
+    for role in models.ROLES:
+        flag = "--panel-model" if role == "panel" else f"--{role}"
+        names = [flag, "--auditor"] if role == "judge" else [flag]
+        default = (os.environ.get(f"MP_{role_dest(role).upper()}") or None) if from_env else None
+        p.add_argument(*names, dest=role_dest(role), default=default,
+                       help=f"{ROLE_HELP[role]} (default: from mp-agent config)")
+
+
+def given_roles(args):
+    return {role: getattr(args, role_dest(role)) for role in models.ROLES if getattr(args, role_dest(role), None)}
+
+
+def role_args(choices):
+    """Flags that pass every chosen role on to a run."""
+    out = []
+    for role in models.ROLES:
+        flag = "--panel-model" if role == "panel" else f"--{role}"
+        out += [flag, choices[role] or "same"]
+    return out
+
+
+def parser():
+    p = argparse.ArgumentParser(
+        prog="mp-agent", allow_abbrev=False,
+        description="Keeps working on a coding task until the checks, a quick reviewer, a pre-audit panel and a "
+                    "final judge all agree. A planner model plans the work and decides whether to split it into "
+                    "parallel subtasks for the workers. It keeps going while it makes progress; when it stops "
+                    "making progress it asks the planner for a ruling, then a re-plan, then asks you.",
+        epilog='Also: mp-agent answer "text"  |  mp-agent status [-f]  |  mp-agent clean [--yes]   '
+               "Watch: http://127.0.0.1:7788 (opens by itself; MP_VIZ=0 to skip)")
+    p.add_argument("task", nargs="+", help="what to do")
+    p.add_argument("--repo", "--folder", dest="folder", help="project folder (default: current directory; "
+                   "with --new, a fresh folder under ~/mp-projects)")
+    p.add_argument("--new", action="store_true", help="start a new project in ~/mp-projects/<task> instead of "
+                   "the current directory")
+    p.add_argument("--init", action="store_true", help="allow setting up git in a folder that has files but no git")
+    p.add_argument("--check", help="validation command (default: the planner chooses)")
+    p.add_argument("--workers", type=int, default=env("MP_WORKERS", 3, int), help="parallel subtasks (default 3)")
+    p.add_argument("--patience", type=int, default=env("MP_PATIENCE", None, int),
+                   help="unchanged passes before escalating (default: from the preset, else 3)")
+    p.add_argument("--churn", type=int, default=env("MP_CHURN", None, int),
+                   help="unapproved rounds in a row before escalating (default: from the preset, else 8)")
+    p.add_argument("--budget", type=float, default=env("MP_BUDGET", 180.0, float),
+                   help="safety net in working minutes, time waiting for you excluded (default 180)")
+    p.add_argument("--max-calls", type=int, default=env("MP_MAX_CALLS", 800, int),
+                   help="safety net on total model calls (default 800)")
+    p.add_argument("--max-usd", type=float, default=None,
+                   help="spending cap on real money per job (API-billed models; subscriptions are not counted); "
+                        "when reached it asks before carrying on (default: from mp-agent config, none)")
+    p.add_argument("--panel", type=int, default=env("MP_PANEL", None, int),
+                   help="pre-audit panel lenses 0-3 (default: from the preset, else 3)")
+    p.add_argument("--no-critic", action="store_true", help="skip the fast reviewer")
+    p.add_argument("--no-audit", action="store_true", help="skip the final auditor")
+    add_role_flags(p, from_env=True)
+    p.add_argument("--no-plan", action="store_true", help="skip planning: one unit, the task as its contract")
+    p.add_argument("--no-ask", action="store_true", help="never wait for you; stop NOT approved instead")
+
+    p.add_argument("--timeout", type=int, default=env("MP_TIMEOUT", 900, int), help="per call, seconds")
+    p.add_argument("--min-interval", type=float, default=env("MP_MIN_INTERVAL", 3.0, float),
+                   help="shortest gap between call starts per provider; widens by itself when a provider "
+                        "refuses (default 3)")
+    p.add_argument("--keep", action="store_true", help="keep the worktree after success")
+    p.add_argument("--resume-run", help=argparse.SUPPRESS)
+    p.add_argument("--oneoff", action="store_true", help=argparse.SUPPRESS)
+    return p
+
+
+def answer(argv):
+    p = argparse.ArgumentParser(prog="mp-agent answer")
+    p.add_argument("text", nargs="+")
+    p.add_argument("--run", help="run folder (default: the run that is waiting)")
+    args = p.parse_args(argv)
+    target = args.run
+    if not target:
+        waiting = []
+        for name in sorted(os.listdir(RUNS), reverse=True) if os.path.isdir(RUNS) else []:
+            if os.path.exists(os.path.join(RUNS, name, "question.json")):
+                waiting.append(os.path.join(RUNS, name))
+        if not waiting:
+            print("no run is waiting for an answer", file=sys.stderr)
+            return 1
+        if len(waiting) > 1:
+            print("more than one run is waiting; pass --run:\n  " + "\n  ".join(waiting), file=sys.stderr)
+            return 1
+        target = waiting[0]
+    with open(os.path.join(target, "question.json")) as fh:
+        q = json.load(fh)
+    tmp = os.path.join(target, "answer.json.tmp")
+    with open(tmp, "w") as fh:
+        json.dump({"answer": " ".join(args.text)}, fh)
+    os.replace(tmp, os.path.join(target, "answer.json"))
+    print(f"answered: {q.get('question')}")
+    return 0
+
+
+def installed_models():
+    """Every model usable here, with the stored API keys counted."""
+    from . import keys
+    return models.available(key_env=keys.environment(STATE),
+                            claude_billing=models.load_extra(STATE).get("claude_billing") or "subscription")
+
+
+def choose_models(given=None, options=None):
+    """Chosen names (flags or config) → specs, checked. Returns (choices, options, problem).
+    given: {role: name} from flags; a missing role comes from the config. For the
+    reviewer and panel, "same" (or nothing) means the workers' model."""
+    given = given or {}
+    config = models.load_config(STATE)
+    options = options if options is not None else installed_models()
+    choices = {}
+    try:
+        for role in models.ROLES:
+            name = given.get(role) or config[role]
+            if role in models.REQUIRED:
+                choices[role] = models.resolve(name, options)
+            else:
+                same = not name or str(name).strip().lower() in ("same", "workers", "worker")
+                choices[role] = models.SAME if same else models.resolve(name, options)
+    except models.ChoiceError as exc:
+        return None, options, str(exc)
+    problems = models.check_independent(choices)
+    return (None, options, "; ".join(problems)) if problems else (choices, options, None)
+
+
+def roles_line(choices, options):
+    return "; ".join(f"{role} {models.label_for(choices[role], options, role)}" for role in models.ROLES)
+
+
+def list_models(argv):
+    p = argparse.ArgumentParser(prog="mp-agent models")
+    p.add_argument("--json", action="store_true")
+    args = p.parse_args(argv)
+    options = models.with_problems(STATE, installed_models())
+    config = models.load_config(STATE)
+    extra = models.load_extra(STATE)
+    found = models.presets(options)
+    if args.json:
+        print(json.dumps({"available": options, "chosen": config, "builtin": models.BUILTIN, "roles": models.ROLES,
+                          "presets": found, "preset": extra.get("preset"), "tuning": models.load_tuning(STATE),
+                          "max_usd": float(extra.get("max_usd") or 0)}))
+        return 0
+    for role in models.ROLES:
+        print(f"{role:9} {models.label_for(config[role], options, role)}" + (f"  [{config[role]}]" if config[role] else ""))
+    tuning = models.load_tuning(STATE)
+    print(f"\nloop      panel of {tuning['panel_size']}, escalates after {tuning['patience']} unchanged passes or "
+          f"{tuning['churn']} unapproved rounds")
+    print("\npresets:")
+    for preset in found:
+        mark = "*" if extra.get("preset") == preset["id"] else " "
+        print(f" {mark} {preset['id']:8} {preset['name']}: {preset['about']}")
+        print("            " + (roles_line(preset["roles"], options) if preset["roles"]
+                                 else "needs " + " and ".join(preset["missing"])))
+    print("\navailable (any can take any role; the planner and judge must differ from the workers):")
+    for o in options:
+        print(f"  {o['spec']:34} {o['label']}")
+    print("\nchange with: mp-agent config --preset claude   or   mp-agent config --judge opus --reviewer same")
+    return 0
+
+
+def set_config(argv):
+    p = argparse.ArgumentParser(prog="mp-agent config", allow_abbrev=False)
+    add_role_flags(p)
+    p.add_argument("--preset", help="choose every role and the loop settings from a preset (see mp-agent models)")
+    p.add_argument("--max-usd", type=float, help="default spending cap per job in dollars (0 = none)")
+    p.add_argument("--claude-billing", choices=("subscription", "api"),
+                   help="how Claude Code is paid for: your Claude login (default) or your stored Anthropic API key")
+    args = p.parse_args(argv)
+    if args.claude_billing:
+        models.save_extra(STATE, {"claude_billing": args.claude_billing})
+        print(f"claude_billing  {args.claude_billing}")
+        if not (args.max_usd is not None or args.preset or given_roles(args)):
+            return 0
+    if args.max_usd is not None:
+        models.save_extra(STATE, {"max_usd": max(0.0, args.max_usd)})
+        print(f"max_usd   {max(0.0, args.max_usd):g}" + (" (no cap)" if not args.max_usd else ""))
+    options = installed_models()
+    if args.preset:
+        chosen, problem = models.apply_preset(STATE, args.preset, options)
+        if problem:
+            print(f"not changed: {problem}", file=sys.stderr)
+            return 1
+        print(f"preset    {args.preset}")
+    given = given_roles(args)
+    if not given:
+        if args.preset:
+            for role, spec in models.load_config(STATE).items():
+                print(f"{role:9} {models.label_for(spec, options, role)}")
+        return 0
+    choices, _, problem = choose_models(given, options)
+    if problem:
+        print(f"not changed: {problem}", file=sys.stderr)
+        return 1
+    saved = models.save_config(STATE, choices)
+    models.save_extra(STATE, {"preset": None})      # hand-picked now
+    for role in models.ROLES:
+        print(f"{role:9} {saved[role] or 'same as the workers'}")
+    return 0
+
+
+def list_places(argv):
+    p = argparse.ArgumentParser(prog="mp-agent where")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--refresh", action="store_true", help="re-read the GitHub repo list now")
+    p.add_argument("--cwd", default=os.getcwd())
+    args = p.parse_args(argv)
+    here = gitops.toplevel(args.cwd)
+    here = here if here and os.path.realpath(here) != os.path.realpath(HOME) else None
+    local = places.local_repos(HOME)
+    remote = places.github_repos(STATE, refresh=args.refresh)
+    clones = {r["github"].lower(): r["path"] for r in places.local_repos(HOME, limit=500) if r["github"]}
+    for r in remote:
+        r["local"] = clones.get(r["github"].lower())
+    if args.json:
+        print(json.dumps({"here": here, "local": local, "github": remote, "home": HOME}))
+        return 0
+    if here:
+        print(f"This folder:  {here}")
+    print("\nRecent local projects:")
+    for i, r in enumerate(local, 1):
+        flags = (" (uncommitted changes)" if r["dirty"] else "") + (" (protected: never pushed)" if r["protected"] else "")
+        print(f"  L{i:<2} ~/{r['name']}  [{r['branch']}]{flags}")
+    print("\nYour GitHub repos (most recently pushed):")
+    for i, r in enumerate(remote[:15], 1):
+        where_now = f"local copy: {r['local']}" if r["local"] else "not cloned yet"
+        print(f"  G{i:<2} {r['github']}  ({where_now})")
+    print("\nOr: 'new' for a new project, or 'one-off' for a throwaway job whose result is kept in its own folder.")
+    return 0
+
+
+def read_task(words):
+    if words:
+        return " ".join(words).strip()
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip()
+    return ""
+
+
+def start(argv):
+    """Work out where the task should run, launch it detached, open the workshop,
+    and return within seconds. Cline kills commands after 30 seconds, so nothing
+    here may wait for the work itself."""
+    p = argparse.ArgumentParser(prog="mp-agent start", allow_abbrev=False)
+    p.add_argument("task", nargs="*", help="the task (or pass it on stdin)")
+    p.add_argument("--new", action="store_true", help="build it in a new folder under ~/mp-projects")
+    p.add_argument("--init", action="store_true", help="set up git in this folder even though it has files")
+    add_role_flags(p)
+    p.add_argument("--repo", help="work in this local project instead of the current folder")
+    p.add_argument("--github", help="owner/repo: pull the latest (or clone it) and work there")
+    p.add_argument("--oneoff", action="store_true", help="a throwaway project; the approved result is kept in its folder")
+    p.add_argument("--name", help="folder name for --new or --oneoff")
+    p.add_argument("--max-usd", help="spending cap for this job in dollars")
+    # the run's own options that take a value, passed on as they are (unknown flags
+    # without a value, such as --no-critic, pass through by themselves)
+    forwarded = ("--panel", "--patience", "--churn", "--budget", "--max-calls", "--timeout", "--min-interval",
+                 "--workers", "--check")
+    for flag in forwarded:
+        p.add_argument(flag, dest="fwd_" + flag[2:].replace("-", "_"))
+    args, passthrough = p.parse_known_args(argv)
+    for flag in forwarded:
+        value = getattr(args, "fwd_" + flag[2:].replace("-", "_"))
+        if value is not None:
+            passthrough = [*passthrough, flag, value]
+    if args.max_usd not in (None, ""):
+        try:
+            passthrough = [*passthrough, "--max-usd", str(float(args.max_usd))]
+        except ValueError:
+            print(f"NEEDS: the spending cap must be a number, not '{args.max_usd}'")
+            return 3
+    task = read_task(args.task)
+    if not task:
+        print("NEEDS: a task to do. Say what you want built or fixed.")
+        return 3
+    choices, options, problem = choose_models(given_roles(args))
+    if problem:
+        print(f"NEEDS: {problem}")
+        return 3
+    passthrough = [*passthrough, *role_args(choices)]
+
+    cwd = os.path.abspath(os.path.expanduser(args.repo)) if args.repo else os.getcwd()
+    if args.github:
+        try:
+            cwd = places.prepare_github(args.github, HOME, say=lambda m: print(m))
+        except gitops.SetupError as exc:
+            print(f"NEEDS: {exc}")
+            return 3
+    top = gitops.toplevel(cwd)
+    home = os.path.realpath(HOME)
+    folder, where = cwd, "your project, on a separate branch"
+    if args.oneoff:
+        from datetime import datetime
+        name = args.name or f"oneoff-{datetime.now().strftime('%Y%m%d-%H%M')}-{gitops.slugify(task, 24)}"
+        folder, where = os.path.join(HOME, "mp-projects", gitops.slugify(name, 60)), "a one-off; the result is kept in its folder"
+        passthrough = [*passthrough, "--oneoff"]
+    elif args.new:
+        folder = os.path.join(HOME, "mp-projects", gitops.slugify(args.name, 60)) if args.name else None
+        where = "a new project"
+    elif top and os.path.realpath(top) != home:
+        folder = top
+        if gitops.is_dirty(top):
+            print(f"NEEDS: {top} has uncommitted changes, and the agents only work from a clean state. Commit "
+                  f"them first and ask again, or reply 'new project' to build this in a separate new folder.")
+            return 3
+    elif args.repo and not top:
+        print(f"NEEDS: {cwd} is not a git project. Reply 'use this folder' to let the agents set up git there, "
+              f"or 'new project' to build it in a separate new folder.")
+        return 3
+    elif os.path.realpath(cwd) == home or os.path.realpath(cwd) in ("/tmp", "/") or not os.listdir(cwd):
+        folder, where = None, "a new project"
+    elif not args.init:
+        print(f"NEEDS: {cwd} is not a git project. Reply 'use this folder' to let the agents set up git here "
+              f"(your files are not changed), or 'new project' to build it in a separate new folder.")
+        return 3
+    try:
+        repo = gitops.setup_project(folder, task, init=args.init, home=HOME, say=lambda *_: None)
+    except gitops.SetupError as exc:
+        print(f"NEEDS: {exc}")
+        return 3
+
+    run_dir = launch([sys.executable, ENTRY, "--repo", repo, *passthrough, task], repo)
+    if run_dir is None:
+        return 3
+    print(f"Started: {task}")
+    print(f"Working in: {repo} ({where})")
+    print(f"Models: {roles_line(choices, options)}")
+    print(f"{models.label_for(choices['planner'], options)} is planning it now. "
+          "Watch it live at http://127.0.0.1:7788 (opened in your browser);")
+    print("any question and the final result will appear there, with a desktop notification.")
+    print(f"Run: {run_dir}")
+    return 0
+
+
+ENTRY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "bin", "mp-agent")
+
+
+def launch(command, cwd):
+    """Start a run detached from this process, open the workshop, and return the
+    new run's folder once it exists (or None, having printed why)."""
+    os.makedirs(STATE, exist_ok=True)
+    log_path = os.path.join(STATE, "last-start.log")
+    offset = os.path.getsize(log_path) if os.path.exists(log_path) else 0
+    with open(log_path, "a") as log:
+        child = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+    start_visualizer(None)
+    run_dir = None
+    deadline = time.time() + 20
+    while time.time() < deadline and run_dir is None:
+        if child.poll() is not None:
+            break
+        for name in sorted(os.listdir(RUNS), reverse=True) if os.path.isdir(RUNS) else []:
+            try:
+                with open(os.path.join(RUNS, name, "pid")) as fh:
+                    if int(fh.read().strip()) == child.pid:
+                        run_dir = os.path.join(RUNS, name)
+                        break
+            except (OSError, ValueError):
+                continue
+        time.sleep(0.2)
+    if run_dir is None:
+        with open(log_path, errors="replace") as fh:
+            fh.seek(offset)            # only what this launch wrote
+            said = fh.read().strip()
+        print(f"NEEDS: the agents could not start. {said[-800:] or 'See ' + log_path}")
+    return run_dir
+
+
+def resumable(run_dir):
+    """Why a run cannot be resumed, or None if it can."""
+    if not os.path.exists(os.path.join(run_dir, "plan.json")):
+        return "it stopped before its plan was made; start the task again instead"
+    try:
+        with open(os.path.join(run_dir, "pid")) as fh:
+            os.kill(int(fh.read().strip()), 0)
+        return "it is still running"
+    except (OSError, ValueError):
+        pass
+    meta_path = os.path.join(run_dir, "metadata.json")
+    if os.path.exists(meta_path):
+        with open(meta_path) as fh:
+            meta = json.load(fh)
+        if meta.get("approved"):
+            return "it already finished and was approved"
+        if meta.get("resolution"):
+            return f"it was already {meta['resolution']['action']}"
+        if meta.get("resumed_as"):
+            return f"it was already resumed as {os.path.basename(meta['resumed_as'])}"
+    return None
+
+
+def resume(argv):
+    p = argparse.ArgumentParser(prog="mp-agent resume")
+    p.add_argument("--run", help="run folder (default: the most recent run that can be resumed)")
+    args, passthrough = p.parse_known_args(argv)
+    target = args.run
+    if not target:
+        for name in sorted(os.listdir(RUNS), reverse=True) if os.path.isdir(RUNS) else []:
+            if resumable(os.path.join(RUNS, name)) is None:
+                target = os.path.join(RUNS, name)
+                break
+    if not target:
+        print("NEEDS: there is no stopped run to resume")
+        return 3
+    why = resumable(target)
+    if why:
+        print(f"NEEDS: cannot resume {os.path.basename(target)}: {why}")
+        return 3
+    repo = open(os.path.join(target, "repo")).read().strip()
+    task = open(os.path.join(target, "task.md")).read().strip()
+    run_dir = launch([sys.executable, ENTRY, "--resume-run", target, *passthrough, task], repo)
+    if run_dir is None:
+        return 3
+    print(f"Resumed: {task}")
+    print(f"Carrying on from {os.path.basename(target)}; settled work is kept. Watch it at http://127.0.0.1:7788")
+    print(f"Run: {run_dir}")
+    return 0
+
+
+def live_runs():
+    found = []
+    for name in sorted(os.listdir(RUNS), reverse=True) if os.path.isdir(RUNS) else []:
+        try:
+            with open(os.path.join(RUNS, name, "pid")) as fh:
+                pid = int(fh.read().strip())
+            os.kill(pid, 0)
+            if "mp-agent" not in desktop.command_of(pid):
+                continue
+            found.append((os.path.join(RUNS, name), pid))
+        except (OSError, ValueError):
+            continue
+    return found
+
+
+def stop(argv):
+    p = argparse.ArgumentParser(prog="mp-agent stop")
+    p.add_argument("--run", help="run folder (default: the one running)")
+    args = p.parse_args(argv)
+    live = live_runs()
+    if args.run:
+        live = [(d, pid) for d, pid in live if os.path.realpath(d) == os.path.realpath(args.run)]
+    if not live:
+        print("nothing is running")
+        return 1
+    if len(live) > 1:
+        print("more than one run is going; pass --run:\n  " + "\n  ".join(d for d, _ in live), file=sys.stderr)
+        return 1
+    run_dir, pid = live[0]
+    os.kill(pid, signal.SIGTERM)
+    print(f"stopping {os.path.basename(run_dir)}; its work so far is kept")
+    return 0
+
+
+def finished_run(arg):
+    if arg:
+        return arg
+    for name in sorted(os.listdir(RUNS), reverse=True) if os.path.isdir(RUNS) else []:
+        path = os.path.join(RUNS, name)
+        if os.path.exists(os.path.join(path, "metadata.json")):
+            return path
+    return None
+
+
+def resolve(argv, which):
+    from . import actions
+    p = argparse.ArgumentParser(prog=f"mp-agent {which}")
+    p.add_argument("--run", help="run folder (default: the most recent finished run)")
+    args = p.parse_args(argv)
+    run_dir = finished_run(args.run)
+    if not run_dir:
+        print("no finished run found", file=sys.stderr)
+        return 1
+    try:
+        print((actions.keep if which == "keep" else actions.discard)(run_dir))
+        return 0
+    except actions.ActionError as exc:
+        print(f"not done: {exc}", file=sys.stderr)
+        return 1
+
+
+SELFTEST_TASK = "Fix add() in calc.py so python3 test_calc.py prints ok"
+
+
+def selftest(argv):
+    """Everything this depends on can change under it (Cline updates itself;
+    logins expire), so check the pieces, then do one tiny real task."""
+    ok = True
+
+    def check(label, passed, detail=""):
+        nonlocal ok
+        ok = ok and passed
+        print(f"  {'✓' if passed else '✗'} {label}{(': ' + detail) if detail else ''}")
+
+    print("mp-agent selftest\n")
+    print("the pieces")
+    check("git", bool(shutil.which("git")))
+    chosen, options, problem = choose_models()
+    check("models chosen and available", chosen is not None, problem or roles_line(chosen, options))
+    tools = sorted({spec.split(":")[0] for spec in models.effective(chosen or {}).values() if spec})
+    commands = {"claude": "claude", "codex": "codex", "cline": "cline", "qwen": "qwen", "gemini": "gemini",
+                "antigravity": "agy", "opencode": "opencode"}
+    for tool in tools:
+        check(f"{tool} is installed", bool(shutil.which(commands.get(tool, tool))))
+    if "claude" in tools and shutil.which("claude"):
+        status = subprocess.run(["claude", "auth", "status"], capture_output=True, text=True, env=providers.claude_env())
+        try:
+            auth = json.loads(status.stdout)
+        except ValueError:
+            auth = {}
+        check("claude logged in on a subscription", bool(auth.get("loggedIn")) and auth.get("authMethod") == "claude.ai",
+              f"{auth.get('authMethod')} / {auth.get('subscriptionType')}" if auth else "no answer from claude")
+    if chosen and chosen["worker"].startswith("cline:") and shutil.which("cline"):
+        # Cline's background process reads MCP settings when it starts, so a server
+        # added later is invisible until that process restarts.
+        probe = subprocess.run(["cline", "--cwd", tempfile.gettempdir(), "--provider", chosen["worker"].split(":")[1],
+                                "--model", chosen["worker"].split(":", 2)[2], "--timeout", "90",
+                                "List the names of the MCP tools you have whose names contain context7 or playwright, "
+                                "comma separated, nothing else. If you have none, reply NONE."],
+                               capture_output=True, text=True, timeout=150)
+        seen = probe.stdout.lower()
+        check("workers can use Context7 and Playwright (MCP)", "context7" in seen and "playwright" in seen,
+              "" if "context7" in seen and "playwright" in seen else
+              "not visible to Cline; run `cline mcp install context7 --yes -- npx -y @upstash/context7-mcp` (and "
+              "playwright), then restart Cline's background process: pkill -f cline-hub-daemon")
+    if not desktop.can_notify():
+        print("  · no desktop notifications (notify-send is not installed); questions still show in the workshop")
+    check("workshop (mp-viz)", bool(shutil.which("mp-viz")))
+    if not ok:
+        print("\nfix the ✗ items above, then run the selftest again")
+        return 1
+
+    print(f"\none tiny real task with your chosen models ({roles_line(chosen, options)}), all gates\n")
+    folder = tempfile.mkdtemp(prefix="mp-selftest-")
+    with open(os.path.join(folder, "calc.py"), "w") as fh:
+        fh.write("def add(a, b):\n    return a - b\n")
+    with open(os.path.join(folder, "test_calc.py"), "w") as fh:
+        fh.write('from calc import add\nassert add(2, 3) == 5\nprint("ok")\n')
+    gitops.git(folder, "init", "-q", "-b", "main")
+    gitops.git(folder, "add", "-A")
+    gitops.git(folder, "commit", "-q", "-m", "selftest start")
+    started = time.time()
+    code = main(["--repo", folder, *argv, SELFTEST_TASK])
+    latest = finished_run(None)
+    meta = {}
+    if latest:
+        with open(os.path.join(latest, "metadata.json")) as fh:
+            meta = json.load(fh)
+    counters = meta.get("counters") or {}
+    costs = meta.get("costs") or {}
+    print("\nresult")
+    check("approved", code == 0, meta.get("outcome", ""))
+    print(f"    {int(time.time() - started)}s in all, {int(counters.get('queue_seconds', 0))}s queueing; "
+          f"{providers.cost_line(costs) if 'by_model' in costs else ''}")
+    shutil.rmtree(folder, ignore_errors=True)
+    print("\nall good" if ok else f"\nsomething is wrong; the logs are in {latest}")
+    return 0 if ok else 1
+
+
+def launchers_command(argv):
+    """mp-agent launchers [--install] [--print TOOL]: /mp-agent in each AI coding tool you have."""
+    from . import launchers
+    p = argparse.ArgumentParser(prog="mp-agent launchers", allow_abbrev=False)
+    p.add_argument("--install", action="store_true", help="write them (default: show where they would go)")
+    p.add_argument("--print", dest="show", metavar="TOOL", help="print one tool's launcher")
+    args = p.parse_args(argv)
+    if args.show:
+        print(launchers.render(args.show))
+        return 0
+    if args.install:
+        for tool, path, what in launchers.install(HOME):
+            print(f"  {tool:9} {what}: {path}")
+        return 0
+    for tool, (path, present) in launchers.targets(HOME).items():
+        print(f"  {tool:9} {'would install' if present else 'not installed, skipped'}: {path}")
+    print("\nrun `mp-agent launchers --install` to write them")
+    return 0
+
+
+def keys_command(argv):
+    """mp-agent keys list | set PROVIDER | remove PROVIDER. set reads the key from stdin
+    (or asks without echoing), so it never appears in your shell history or process list."""
+    import getpass
+    from . import keys
+    action, rest = (argv[0], argv[1:]) if argv else ("list", [])
+    if action == "list":
+        info = keys.status(STATE)
+        if "--json" in rest:
+            print(json.dumps(info))
+            return 0
+        print(f"keys are kept in {info['store']}\n")
+        for p in info["providers"]:
+            state = (f"stored (…{p['last4']})" if p["stored"] else
+                     "set in your environment" if p["in_environment"] else "not set")
+            print(f"  {p['id']:11} {state:24} {p['env']:20} {p['for']}")
+        print("\nadd one: mp-agent keys set openrouter   (it asks for the key)")
+        return 0
+    if action in ("set", "remove") and rest:
+        provider = rest[0]
+        if action == "remove":
+            print("removed" if keys.remove_key(STATE, provider) else "there was no key stored for it")
+            return 0
+        secret = sys.stdin.readline() if not sys.stdin.isatty() else getpass.getpass(f"{provider} API key: ")
+        try:
+            saved = keys.set_key(STATE, provider, secret)
+        except keys.KeyError_ as exc:
+            print(f"not saved: {exc}", file=sys.stderr)
+            return 1
+        print(f"saved (…{saved['last4']}) in {saved['where']}")
+        return 0
+    print("mp-agent keys list | set PROVIDER | remove PROVIDER   (providers: " + ", ".join(keys.PROVIDERS) + ")",
+          file=sys.stderr)
+    return 2
+
+
+def test_command(argv):
+    from . import setup
+    p = argparse.ArgumentParser(prog="mp-agent test", allow_abbrev=False)
+    p.add_argument("model", help="a model name or spec, e.g. opus or opencode:ollama/qwen3")
+    p.add_argument("--json", action="store_true")
+    args = p.parse_args(argv)
+    options = installed_models()
+    try:
+        spec = models.resolve(args.model, options)
+    except models.ChoiceError as exc:
+        result = {"spec": args.model, "ok": False, "problem": str(exc), "seconds": 0}
+    else:
+        result = setup.test_model(STATE, spec)
+    if args.json:
+        print(json.dumps(result))
+    else:
+        print(f"{result['spec']}: " + (f"works ({result['seconds']}s)" if result["ok"] else f"not working: {result['problem']}"))
+    return 0 if result["ok"] else 1
+
+
+def setup_command(argv):
+    from . import setup
+    info = setup.scan(STATE)
+    if "--json" in argv:
+        print(json.dumps(info))
+        return 0
+    print("tools")
+    for t in info["tools"]:
+        state = ("ready" if t["ready"] else "installed, not set up" if t["installed"] else "not installed")
+        print(f"  {t['name']:12} {state:22} {t['models']} model(s)" + (f"  ⚠ {t['problem']}" if t.get("problem") else ""))
+        if not t["installed"]:
+            print(f"               install: {t['install']}")
+        elif not t["ready"]:
+            print(f"               set up:  {t['login']}")
+    print(f"\nAPI keys (kept in {info['keys']['store']}): " + ", ".join(
+        f"{p['id']} {'stored' if p['stored'] else 'from environment' if p['in_environment'] else '-'}"
+        for p in info["keys"]["providers"]))
+    usable = [p for p in info["presets"] if p["roles"]]
+    print("\npresets you can use: " + (", ".join(p["id"] for p in usable) or "none yet"))
+    print("\n" + ("ready: " + info["ready_detail"] if info["ready"] else "not ready yet: " + info["ready_detail"]))
+    return 0
+
+
+def pull_request(argv):
+    from . import actions
+    p = argparse.ArgumentParser(prog="mp-agent pr")
+    p.add_argument("--run", help="run folder (default: the most recent finished run)")
+    p.add_argument("--base", help="branch to merge into (default: the branch the run started from)")
+    args = p.parse_args(argv)
+    run_dir = finished_run(args.run)
+    if not run_dir:
+        print("no finished run found", file=sys.stderr)
+        return 1
+    try:
+        print(actions.pull_request(run_dir, args.base))
+        return 0
+    except actions.ActionError as exc:
+        print(f"not done: {exc}", file=sys.stderr)
+        return 1
+
+
+def queue_command(argv):
+    from . import jobqueue
+    if not argv or argv[0] in ("-h", "--help"):
+        print('mp-agent queue add [--repo PATH|--github owner/repo|--new|--oneoff] [--judge ..] "task"\n'
+              "mp-agent queue list [--json]\nmp-agent queue remove ID\nmp-agent queue run-next")
+        return 0
+    action, rest = argv[0], argv[1:]
+    if action == "add":
+        flags = rest[:]
+        # the task is the last positional argument (or stdin); everything else is passed to start
+        task = read_task([rest[-1]] if rest and not rest[-1].startswith("-") else [])
+        if rest and not rest[-1].startswith("-"):
+            flags = rest[:-1]
+        if not task:
+            print("NEEDS: a task to queue", file=sys.stderr)
+            return 3
+        job = jobqueue.add(STATE, task, flags)
+        start_visualizer(None, open_window=False)
+        print(f"queued {job['id']}: {task[:80]} ({len(jobqueue.listing(STATE)['jobs'])} waiting)")
+        return 0
+    if action == "list":
+        data = jobqueue.listing(STATE)
+        if "--json" in rest:
+            print(json.dumps(data))
+            return 0
+        for j in data["jobs"]:
+            print(f"  {j['id']}  {j['label']}  {' '.join(j['args'])}")
+        if not data["jobs"]:
+            print("  (nothing waiting)")
+        return 0
+    if action == "remove" and rest:
+        print("removed" if jobqueue.remove(STATE, rest[0]) else "no such job")
+        return 0
+    if action == "run-next":
+        if live_runs():
+            print("a run is going; the next job waits")
+            return 0
+        job = jobqueue.take_next(STATE)
+        if not job:
+            print("nothing queued")
+            return 0
+        proc = subprocess.run([sys.executable, ENTRY, "start", *job["args"]], input=job["task"], capture_output=True,
+                              text=True, cwd=HOME, timeout=900)
+        out = (proc.stdout + proc.stderr).strip()
+        run_dir = next((l.split("Run: ", 1)[1] for l in out.splitlines() if l.startswith("Run: ")), None)
+        jobqueue.record(STATE, job, out.splitlines()[0] if out else "no output", run_dir)
+        print(out)
+        return 0 if run_dir else 1
+    print(f"unknown queue command {action}", file=sys.stderr)
+    return 2
+
+
+def show_history(argv):
+    from . import history
+    summary = history.summarize(RUNS)
+    if "--json" in argv:
+        print(json.dumps(summary))
+        return 0
+    t = summary["totals"]
+    print(f"{t['runs']} runs, {t['approved']} approved, {t['hours']} hours, ${t['billed_usd']:.2f} billed\n")
+    print("by project:")
+    for p in summary["projects"]:
+        print(f"  {p['project'][:30]:30} {p['runs']:3} runs  {p['approved']:3} approved  ${p['billed_usd']:.3f}  "
+              f"{p['seconds'] // 60} min")
+    g = summary["gates"]
+    print(f"\ngates: checks failed {g['check_failures']}, reviewer objected {g['review_objections']}, panel objected "
+          f"{g['panel_objections']}, judge objected {g['judge_objections']} ({g['judge_after_panel']} after the panel "
+          f"had approved), rulings {g['rulings']}, questions for you {g['questions']}")
+    if summary["lenses"]:
+        print("panel objections by lens: " + ", ".join(f"{k} {v}" for k, v in sorted(summary["lenses"].items())))
+    return 0
+
+
+def tidy_command(argv):
+    from . import tidy
+    p = argparse.ArgumentParser(prog="mp-agent tidy")
+    p.add_argument("--yes", action="store_true", help="do it (default: just show what would be tidied)")
+    p.add_argument("--all-runs", action="store_true", help="also archive every finished run, for a fresh history")
+    p.add_argument("--json", action="store_true")
+    args = p.parse_args(argv)
+    planned = tidy.plan(STATE)
+    chosen = [i["id"] for i in planned["items"] if i["count"] and (not i.get("optional") or args.all_runs)]
+    if args.json and not args.yes:
+        print(json.dumps(planned))
+        return 0
+    if not args.yes:
+        for i in planned["items"]:
+            mark = "·" if not i["count"] else ("?" if i.get("optional") and not args.all_runs else "•")
+            print(f"  {mark} {i['count']:3}  {i['label']}")
+        print("\nrun `mp-agent tidy --yes` to do the • items" + ("" if args.all_runs else " (add --all-runs for the ? one)"))
+        return 0
+    done = tidy.apply(STATE, chosen)
+    print(json.dumps(done) if args.json else "\n".join(f"  {k}: {v}" for k, v in done.items()) or "  nothing to tidy")
+    return 0
+
+
+def clean(argv):
+    """Worktrees are kept when a run stops so its state can be inspected. Once
+    looked at they are clutter. Branches, and so the work itself, are never removed."""
+    p = argparse.ArgumentParser(prog="mp-agent clean")
+    p.add_argument("--yes", action="store_true", help="actually remove them (default: just list)")
+    args = p.parse_args(argv)
+    live = set()
+    for name in os.listdir(RUNS) if os.path.isdir(RUNS) else []:
+        pid_file = os.path.join(RUNS, name, "pid")
+        try:
+            with open(pid_file) as fh:
+                os.kill(int(fh.read().strip()), 0)
+            live.add(name)
+        except (OSError, ValueError):
+            pass
+    found = 0
+    for name in sorted(os.listdir(TREES)) if os.path.isdir(TREES) else []:
+        path = os.path.join(TREES, name)
+        if any(name == run or name.startswith(run + "-") for run in live):
+            print(f"live, left alone: {path}")
+            continue
+        repo = None
+        try:
+            with open(os.path.join(path, ".git")) as fh:
+                gitdir = fh.read().split("gitdir:", 1)[1].strip()
+            repo = gitdir.split("/.git/worktrees/")[0]
+        except (OSError, IndexError):
+            pass
+        found += 1
+        where = f"(repo {repo})" if repo and os.path.isdir(repo) else "(its repository no longer exists)"
+        if not args.yes:
+            print(f"would remove {path} {where}")
+            continue
+        if repo and os.path.isdir(repo):
+            gitops.worktree_remove(repo, path)
+            gitops.git(repo, "worktree", "prune", check=False)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        print(f"removed {path} {where}")
+    if not found:
+        print("nothing to clean")
+    elif not args.yes:
+        print(f"\n{found} worktree(s); run `mp-agent clean --yes` to remove them (branches are kept)")
+    return 0
+
+
+def main(argv):
+    if argv and argv[0] == "answer":
+        return answer(argv[1:])
+    if argv and argv[0] == "clean":
+        return clean(argv[1:])
+    if argv and argv[0] == "start":
+        return start(argv[1:])
+    if argv and argv[0] == "stop":
+        return stop(argv[1:])
+    if argv and argv[0] in ("keep", "discard"):
+        return resolve(argv[1:], argv[0])
+    if argv and argv[0] == "selftest":
+        return selftest(argv[1:])
+    if argv and argv[0] == "resume":
+        return resume(argv[1:])
+    if argv and argv[0] == "models":
+        return list_models(argv[1:])
+    if argv and argv[0] == "where":
+        return list_places(argv[1:])
+    if argv and argv[0] == "pr":
+        return pull_request(argv[1:])
+    if argv and argv[0] == "queue":
+        return queue_command(argv[1:])
+    if argv and argv[0] == "history":
+        return show_history(argv[1:])
+    if argv and argv[0] == "tidy":
+        return tidy_command(argv[1:])
+    if argv and argv[0] == "config":
+        return set_config(argv[1:])
+    if argv and argv[0] == "setup":
+        return setup_command(argv[1:])
+    if argv and argv[0] == "launchers":
+        return launchers_command(argv[1:])
+    if argv and argv[0] == "keys":
+        return keys_command(argv[1:])
+    if argv and argv[0] == "test":
+        return test_command(argv[1:])
+    if argv and argv[0] == "status":
+        os.execvp("mp-status", ["mp-status", *argv[1:]])
+    args = parser().parse_args(argv)
+    task = " ".join(args.task)
+
+    resume_info = None
+    if args.resume_run:
+        resume_info = load_resume(args.resume_run, TREES)
+        repo = resume_info["repo"]
+    else:
+        folder = None if args.new else (args.folder or os.getcwd())
+        try:
+            repo = gitops.setup_project(folder, task, init=args.init, home=HOME)
+        except gitops.SetupError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+    choices, _, problem = choose_models(given_roles(args))
+    if problem:
+        print(problem, file=sys.stderr)
+        return 2
+    tuning = models.load_tuning(STATE)
+    for name, key in (("panel", "panel_size"), ("patience", "patience"), ("churn", "churn")):
+        if getattr(args, name) is None:
+            setattr(args, name, tuning[key])
+
+    os.makedirs(RUNS, exist_ok=True)
+    run = Run(RUNS, task)
+    pacer = Pacer(PACE, args.min_interval, record=lambda seconds: run.count("queue_seconds", seconds))
+    tree_prefix = (os.path.join(TREES, os.path.basename(run.dir)) if not args.resume_run
+                   else os.path.join(TREES, os.path.basename(args.resume_run.rstrip("/"))))
+    usage = providers.Usage(lambda totals: run.write_json("usage.json", totals), tree_prefix, run.started - 60)
+    mcp_config = ensure_mcp_config()
+
+    from . import keys
+    key_env = keys.environment(STATE)
+    claude_key = None
+    if models.load_extra(STATE).get("claude_billing") == "api":
+        claude_key = key_env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+
+    def wrap(spec, worker=False):
+        agent = make_agent(spec, args.timeout, worker=worker, mcp_config=mcp_config, key_env=key_env,
+                           claude_api_key=claude_key)
+        agent.on_activity = run.activity
+        return Retrying(agent, pacer, run.say, usage=usage,
+                        on_fatal=lambda line: models.note_problem(STATE, spec, line))
+    worker_agent = wrap(choices["worker"], worker=True)
+    judge = None if args.no_audit else wrap(choices["judge"])
+    planner_agent = None if args.no_plan else wrap(choices["planner"])
+    # the same model as the workers still reviews read-only, as a separate agent
+    reviewer = wrap(choices["reviewer"] or choices["worker"])
+    panel = wrap(choices["panel"] or choices["worker"])
+    run.write_json("roles.json", models.effective(choices))
+    options = Options(workers=args.workers, patience=args.patience, churn=args.churn, panel_size=args.panel,
+                      review=not args.no_critic, audit=not args.no_audit, ask=not args.no_ask, keep=args.keep,
+                      budget_minutes=args.budget, max_calls=args.max_calls,
+                      max_usd=args.max_usd if args.max_usd is not None else float(models.load_extra(STATE).get("max_usd") or 0))
+    decisions = Decisions(save=lambda items: run.write_json("decisions.json", items))
+    if resume_info:
+        decisions.items = list(resume_info["decisions"])
+        mark_resumed(resume_info["dir"], run.dir)
+    ctx = Context(run, worker_agent, judge, planner_agent, decisions, options, reviewer=reviewer, panel=panel)
+    ctx.usage = usage
+    start_visualizer(run)
+
+    def stopped_by_you(*_):
+        ctx.halt("stopped by you")
+        providers.kill_active()
+
+    signal.signal(signal.SIGTERM, stopped_by_you)
+    try:
+        result = Orchestrator(ctx, task, repo, TREES, check_override=args.check,
+                              use_planner=not args.no_plan, resume=resume_info).run()
+    except KeyboardInterrupt:
+        ctx.halt("interrupted")
+        run.say("\nNOT approved: interrupted")
+        run.finish({"approved": False, "outcome": "NOT approved: interrupted", "task": task, "project": repo})
+        return 130
+    if args.oneoff:
+        from . import actions
+        try:
+            if result.get("approved"):
+                run.say(f"one-off: {actions.keep(run.dir)}; your files are in {repo}")
+        except actions.ActionError as exc:
+            run.say(f"one-off: the result was not merged automatically ({exc})")
+        meta_path = os.path.join(run.dir, "metadata.json")
+        with open(meta_path) as fh:
+            meta = json.load(fh)
+        meta["oneoff"] = True
+        with open(meta_path, "w") as fh:
+            json.dump(meta, fh, indent=2)
+    notify("mp-agent: approved" if result.get("approved") else "mp-agent: stopped",
+           f"{task[:80]}\n{result.get('outcome', '')[:160]}")
+    return 0 if result.get("approved") else 1
+
+
+def load_resume(old, trees_root):
+    """Everything a stopped run left behind that its successor needs."""
+    def read_json(name, default):
+        try:
+            with open(os.path.join(old, name)) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return default
+    with open(os.path.join(old, "repo")) as fh:
+        repo = fh.read().strip()
+    branch = read_json("metadata.json", {}).get("branch") or f"mp/{os.path.basename(old)}"
+    return {"dir": old, "repo": repo, "plan": read_json("plan.json", None), "units": read_json("units.json", {}),
+            "meta": read_json("metadata.json", {}),
+            "decisions": read_json("decisions.json", []), "branch": branch,
+            "tree": os.path.join(trees_root, branch[len("mp/"):])}
+
+
+SHOTS = os.path.join(STATE, "shots")
+MCP_SERVERS = {
+    "context7": {"type": "stdio", "command": "npx", "args": ["-y", "@upstash/context7-mcp"]},
+    "playwright": {"type": "stdio", "command": "npx",
+                   "args": ["-y", "@playwright/mcp@latest", "--headless", "--isolated", "--output-dir", SHOTS]},
+}
+
+
+def ensure_mcp_config():
+    """The only MCP servers agents get: current library docs and a headless browser.
+    Claude agents load exactly this file (never the person's other connectors);
+    Cline workers get the same two through Cline's own MCP settings."""
+    path = os.path.join(STATE, "mcp.json")
+    os.makedirs(SHOTS, exist_ok=True)
+    wanted = {"mcpServers": MCP_SERVERS}
+    try:
+        with open(path) as fh:
+            current = json.load(fh)
+    except (OSError, ValueError):
+        current = None
+    if current != wanted:
+        with open(path, "w") as fh:
+            json.dump(wanted, fh, indent=2)
+    return path
+
+
+def mark_resumed(old_dir, new_dir):
+    path = os.path.join(old_dir, "metadata.json")
+    try:
+        with open(path) as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError):
+        meta = {"approved": False, "outcome": "NOT approved: the run ended without a summary (crashed or rebooted)"}
+    meta["resumed_as"] = new_dir
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(meta, fh, indent=2)
+    os.replace(tmp, path)
+
+
+def _has(command):
+    return any(os.access(os.path.join(d, command), os.X_OK) for d in os.environ.get("PATH", "").split(os.pathsep))

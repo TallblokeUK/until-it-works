@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# mp-status — what mp-agent is doing, read from its own run folders.
+#
+#   mp-status          the last 10 runs: live or finished, passes, time, outcome
+#   mp-status -f       follow the live run's log (or the most recent run)
+#   mp-status -n 25    show more runs
+#
+# Everything here comes from files mp-agent writes as it goes, so what it shows
+# is what actually happened, not a guess.
+set -uo pipefail
+RUNS="${MP_RUNS:-$HOME/.mp-agent/runs}"
+N=10
+FOLLOW=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -f|--follow) FOLLOW=1; shift ;;
+        -n) N="$2"; shift 2 ;;
+        -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown option $1" >&2; exit 2 ;;
+    esac
+done
+[ -d "$RUNS" ] && ls -1d "$RUNS"/*/ >/dev/null 2>&1 || { echo "no runs yet"; exit 0; }
+
+live() { [ -f "$1/pid" ] && kill -0 "$(cat "$1/pid")" 2>/dev/null; }
+
+if [ "$FOLLOW" = 1 ]; then
+    target=""
+    for d in $(ls -1dt "$RUNS"/*/ 2>/dev/null); do
+        if live "$d"; then target="$d"; break; fi
+    done
+    [ -n "$target" ] || target="$(ls -1dt "$RUNS"/*/ 2>/dev/null | head -1)"
+    [ -n "$target" ] || { echo "no runs yet"; exit 0; }
+    echo "following $target  (Ctrl+C to stop watching; the run carries on)"
+    echo
+    if live "$target"; then
+        tail -n +1 -f --pid="$(cat "$target/pid")" "$target/run.log"
+    else
+        cat "$target/run.log"
+    fi
+    exit 0
+fi
+
+ls -1dt "$RUNS"/*/ 2>/dev/null | head -n "$N" | while read -r d; do
+    d="${d%/}"
+    task="$(head -c 70 "$d/task.md" 2>/dev/null | tr '\n' ' ')"
+    if [ -f "$d/units.json" ]; then
+        # mp-agent 2: units (main, subtasks, final) each count their own passes
+        summary="$(python3 -c '
+import json,sys
+u=json.load(open(sys.argv[1]))
+passes=sum(int(v.get("passes") or 0) for v in u.values())
+names=[k for k in u if k not in ("main","final")]
+print(f"{passes} pass(es) across {len(u)} unit(s)" + (f": {chr(44).join(names)}" if names else ""))
+' "$d/units.json" 2>/dev/null)"
+    else
+        summary="$(ls -1d "$d"/iteration-* 2>/dev/null | wc -l) pass(es), $(ls -1d "$d"/critic-* 2>/dev/null | wc -l) review(s), $(ls -1d "$d"/audit-* 2>/dev/null | wc -l) audit(s)"
+    fi
+    if live "$d" && [ -f "$d/question.json" ]; then
+        q="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["question"])' "$d/question.json" 2>/dev/null)"
+        state="❓ WAITING FOR YOU: $q
+    answer with: mp-agent answer \"...\""
+    elif live "$d"; then
+        started="$(python3 -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$d/task.md")"
+        state="▶ LIVE     $(cat "$d/phase" 2>/dev/null)  ($(( $(date +%s) - started ))s so far)"
+    elif [ -f "$d/metadata.json" ]; then
+        state="$(python3 -c '
+import json,sys
+m=json.load(open(sys.argv[1]))
+mark="✔ APPROVED " if m.get("approved") else "✘ STOPPED  "
+c=m.get("costs") or {}
+usd=c.get("billed_usd",c.get("mercury_usd",0))
+cost=f" · ${usd:.3f} billed" if c else ""
+res=m.get("resolution") or {}
+print(mark, str(m.get("seconds",0))+"s ", m.get("outcome",""), (" → branch "+m.get("branch","") if m.get("approved") and not res else "") + (" · " + str(res.get("action")) if res else "") + cost)
+' "$d/metadata.json")"
+    else
+        state="? ended without a summary (killed?)"
+    fi
+    printf '%s  %s\n' "$(basename "$d" | cut -c1-15)" "$task"
+    printf '    %s\n' "$state"
+    printf '    %s   logs: %s\n\n' "$summary" "$d"
+done
