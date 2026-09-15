@@ -132,8 +132,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return False
 
     def body(self, limit=10_000):
-        length = min(int(self.headers.get("Content-Length") or 0), limit)
-        return json.loads(self.rfile.read(length) or b"{}")
+        return json.loads(self._raw[:limit] or b"{}")
 
     def do_GET(self):
         global last_poll, last_busy
@@ -208,6 +207,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.reply(404, "text/plain", b"not found")
 
     def do_POST(self):
+        # Read the whole body before anything can refuse the request: replying with data
+        # still unread makes some systems (macOS) reset the connection before the reply arrives.
+        try:
+            self._raw = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 200_000))
+        except (ValueError, OSError):
+            self._raw = b""
         if not self.host_ok():
             return
         path = self.path.split("?")[0]
@@ -220,7 +225,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path in ("/api/start", "/api/queue/add"):
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 100_000)
-                job = json.loads(self.rfile.read(length) or b"{}")
+                job = json.loads(self._raw[:length] or b"{}")
             except ValueError:
                 return self.reply(400, "text/plain", b"bad request")
             task = str(job.get("task") or "").strip()
@@ -267,21 +272,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/tidy":
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-                chosen = [str(i) for i in (json.loads(self.rfile.read(length) or b"{}").get("items") or [])]
+                chosen = [str(i) for i in (json.loads(self._raw[:length] or b"{}").get("items") or [])]
             except ValueError:
                 return self.reply(400, "text/plain", b"bad request")
             return self.reply(200, "application/json", json.dumps({"done": tidy.apply(STATE, chosen)}).encode())
         if path == "/api/queue/remove":
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-                job_id = str(json.loads(self.rfile.read(length) or b"{}").get("id") or "")
+                job_id = str(json.loads(self._raw[:length] or b"{}").get("id") or "")
             except ValueError:
                 return self.reply(400, "text/plain", b"bad request")
             return self.reply(200, "application/json", json.dumps({"removed": jobqueue.remove(STATE, job_id)}).encode())
         if path == "/api/memory/save":
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 200_000)
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body = json.loads(self._raw[:length] or b"{}")
                 memory.save_memory(STATE, str(body.get("id") or ""), str(body.get("text") or ""))
             except (ValueError, OSError) as exc:
                 return self.reply(409, "text/plain", f"not saved: {exc}".encode())
@@ -289,7 +294,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path in ("/api/changes", "/api/pr"):
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body = json.loads(self._raw[:length] or b"{}")
                 run = os.path.join(RUNS, os.path.basename(str(body.get("run") or "")))
                 if path == "/api/changes":
                     return self.reply(200, "application/json", json.dumps(actions.changes(run)).encode())
@@ -302,7 +307,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/open-folder":
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-                name = os.path.basename(str(json.loads(self.rfile.read(length) or b"{}").get("run") or ""))
+                name = os.path.basename(str(json.loads(self._raw[:length] or b"{}").get("run") or ""))
                 meta = json.loads(read(os.path.join(RUNS, name, "metadata.json")) or "{}")
             except ValueError:
                 return self.reply(400, "text/plain", b"bad request")
@@ -350,7 +355,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/settings":
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-                wanted = json.loads(self.rfile.read(length) or b"{}")
+                wanted = json.loads(self._raw[:length] or b"{}")
             except ValueError:
                 return self.reply(400, "text/plain", b"bad request")
             entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
@@ -371,7 +376,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/resume":
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-                name = os.path.basename(str(json.loads(self.rfile.read(length) or b"{}").get("run") or ""))
+                name = os.path.basename(str(json.loads(self._raw[:length] or b"{}").get("run") or ""))
             except ValueError:
                 return self.reply(400, "text/plain", b"bad request")
             run = os.path.join(RUNS, name)
@@ -386,7 +391,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path in ("/api/keep", "/api/discard", "/api/describe"):
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-                name = os.path.basename(str(json.loads(self.rfile.read(length) or b"{}").get("run") or ""))
+                name = os.path.basename(str(json.loads(self._raw[:length] or b"{}").get("run") or ""))
                 run = os.path.join(RUNS, name)
                 if not name or not os.path.isdir(run):
                     return self.reply(404, "text/plain", b"no such run")
@@ -416,7 +421,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(404, "text/plain", b"not found")
         try:
             length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-            answer = str(json.loads(self.rfile.read(length) or b"{}").get("answer") or "").strip()
+            answer = str(json.loads(self._raw[:length] or b"{}").get("answer") or "").strip()
         except (ValueError, AttributeError):
             return self.reply(400, "text/plain", b"bad request")
         if not answer:

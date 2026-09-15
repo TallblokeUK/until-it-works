@@ -116,6 +116,8 @@
   .setgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:8px 0}
   .setgrid label{display:flex;flex-direction:column;gap:4px;font-size:20px}
   .setgrid small{color:var(--dim);font-size:16px}
+  /* descriptions wrap to different heights; the boxes still line up along the bottom of each row */
+  .setgrid label > select,.setgrid label > input{margin-top:auto;width:100%}
   .setgrid select,.presetpick select{font:inherit;font-size:19px;background:#0d0b1e;color:#fff;border:2px solid var(--edge);padding:4px;max-width:100%}
   .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
   .tab{font-family:var(--crt);font-size:18px;background:var(--ink);color:var(--dim);border:2px solid var(--edge);padding:3px 10px;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -905,8 +907,8 @@ function renderTokens() {
   $("tokens").innerHTML = html;
 }
 
-// a bigger window may not need the trim any more; measure again from scratch
-window.addEventListener("resize", () => document.documentElement.style.removeProperty("--trim"));
+// a different window size needs measuring again
+window.addEventListener("resize", () => renderHud());
 
 function renderHud() {
   renderTokens();
@@ -919,11 +921,13 @@ function renderHud() {
     // the scene gives up exactly the height the panels under it need
     const below = document.querySelector(".jobrow");
     if (below && window.innerWidth > 1180) document.documentElement.style.setProperty("--below", below.offsetHeight + "px");
-    // and whatever the page still overshoots by (a wrapped header, borders), so it never scrolls
-    const root = document.documentElement, over = root.scrollHeight - window.innerHeight;
-    if (window.innerWidth > 1180 && over > 1) {
-      root.style.setProperty("--trim", ((parseFloat(root.style.getPropertyValue("--trim")) || 0) + over) + "px");
-    }
+    // and whatever the page still overshoots by (a wrapped header, borders), so it never scrolls.
+    // Measured from nothing each time: a trim that only ever grew left the scene shrunk (and empty
+    // space under it) long after a tall question or panel had gone away.
+    const root = document.documentElement;
+    root.style.setProperty("--trim", "0px");
+    const over = root.scrollHeight - window.innerHeight;       // reading this lays the page out again
+    if (window.innerWidth > 1180 && over > 1) root.style.setProperty("--trim", over + "px");
   });
   $("stopRun").hidden = !(S.live && !DEMO);
   const q = S.live && S.question && S.question.question;
