@@ -18,6 +18,7 @@
     mp-agent protect [add|remove OWNER[/REPO]]   repositories that are never pushed to
     mp-agent rules [PATH] [on|off]       the project's CLAUDE.md, AGENTS.md and the like, given to every role
     mp-agent mcp [list|add|remove|on|off]   the MCP servers every role is given
+    mp-agent pagecheck FILE|URL [--query Q]  load a web page headless; fail if its JavaScript throws
     mp-agent models [--json]             the models available for each role, the presets, the current choices
     mp-agent where [--json] [--refresh]  where a job can run: recent local projects, GitHub repos, new, one-off
     mp-agent pr [--run DIR] [--base BRANCH]   push a finished run's branch and open a GitHub pull request
@@ -127,6 +128,11 @@ def parser():
     p.add_argument("--no-audit", action="store_true", help="skip the final auditor")
     add_role_flags(p, from_env=True)
     p.add_argument("--no-plan", action="store_true", help="skip planning: one unit, the task as its contract")
+    shape = p.add_mutually_exclusive_group()
+    shape.add_argument("--solo", dest="shape", action="store_const", const="solo",
+                       help="one worker on the whole task (default: the planner decides)")
+    shape.add_argument("--swarm", dest="shape", action="store_const", const="swarm",
+                       help="split the task into parts built in parallel (default: the planner decides)")
     p.add_argument("--no-ask", action="store_true", help="never wait for you; stop NOT approved instead")
 
     p.add_argument("--timeout", type=int, default=env("MP_TIMEOUT", 900, int), help="per call, seconds")
@@ -211,6 +217,7 @@ def list_models(argv):
     if args.json:
         print(json.dumps({"available": options, "chosen": config, "builtin": models.BUILTIN, "roles": models.ROLES,
                           "presets": found, "preset": extra.get("preset"), "tuning": models.load_tuning(STATE),
+                          "upgrade": models.load_upgrade(STATE),
                           "max_usd": float(extra.get("max_usd") or 0)}))
         return 0
     for role in models.ROLES:
@@ -236,9 +243,25 @@ def set_config(argv):
     add_role_flags(p)
     p.add_argument("--preset", help="choose every role and the loop settings from a preset (see mp-agent models)")
     p.add_argument("--max-usd", type=float, help="default spending cap per job in dollars (0 = none)")
+    p.add_argument("--when-stuck", choices=("ask", "auto", "never"),
+                   help="when the workers get stuck: offer a stronger model (ask), switch automatically (auto), or never")
+    p.add_argument("--upgrade-to", help="with --when-stuck auto: the model to switch to (default: the strongest available)")
+    p.add_argument("--max-upgrades", type=int, help="how many times one job may switch to a stronger worker (default 1)")
     p.add_argument("--claude-billing", choices=("subscription", "api"),
                    help="how Claude Code is paid for: your Claude login (default) or your stored Anthropic API key")
     args = p.parse_args(argv)
+    if args.when_stuck or args.upgrade_to is not None or args.max_upgrades is not None:
+        current = models.load_upgrade(STATE)
+        if args.when_stuck:
+            current["mode"] = args.when_stuck
+        if args.upgrade_to is not None:
+            current["to"] = models.resolve(args.upgrade_to, installed_models()) if args.upgrade_to else ""
+        if args.max_upgrades is not None:
+            current["max"] = max(0, args.max_upgrades)
+        models.save_extra(STATE, {"upgrade": current})
+        print(f"when stuck: {current['mode']}" + (f", to {current['to']}" if current["to"] else "") + f", at most {current['max']} per job")
+        if not (args.claude_billing or args.max_usd is not None or args.preset or given_roles(args)):
+            return 0
     if args.claude_billing:
         models.save_extra(STATE, {"claude_billing": args.claude_billing})
         print(f"claude_billing  {args.claude_billing}")
@@ -628,6 +651,17 @@ def selftest(argv):
     shutil.rmtree(folder, ignore_errors=True)
     print("\nall good" if ok else f"\nsomething is wrong; the logs are in {latest}")
     return 0 if ok else 1
+
+
+def pagecheck_command(argv):
+    from . import pagecheck
+    p = argparse.ArgumentParser(prog="mp-agent pagecheck", allow_abbrev=False,
+                                description="Load a web page in a headless browser; fail if its JavaScript throws.")
+    p.add_argument("target", help="an HTML file (served from its folder) or a URL")
+    p.add_argument("--query", action="append", default=[], help='added to the address, e.g. "?demo=1" (repeatable)')
+    p.add_argument("--wait", type=int, default=5000, help="how long the page runs, in milliseconds (default 5000)")
+    args = p.parse_args(argv)
+    return pagecheck.check(args.target, args.query or [""], args.wait)
 
 
 def mcp_command(argv):
@@ -1030,6 +1064,8 @@ def main(argv):
         return set_config(argv[1:])
     if argv and argv[0] == "setup":
         return setup_command(argv[1:])
+    if argv and argv[0] == "pagecheck":
+        return pagecheck_command(argv[1:])
     if argv and argv[0] == "mcp":
         return mcp_command(argv[1:])
     if argv and argv[0] == "rules":
@@ -1048,6 +1084,9 @@ def main(argv):
         os.execvp("mp-status", ["mp-status", *argv[1:]])
     args = parser().parse_args(argv)
     task = " ".join(args.task)
+    if args.shape == "swarm" and args.no_plan:
+        print("a swarm needs the planner to split the work; drop --no-plan or --swarm", file=sys.stderr)
+        return 2
 
     resume_info = None
     if args.resume_run:
@@ -1112,13 +1151,18 @@ def main(argv):
     run.write_json("roles.json", models.effective(choices))
     options = Options(workers=args.workers, patience=args.patience, churn=args.churn, panel_size=args.panel,
                       review=not args.no_critic, audit=not args.no_audit, ask=not args.no_ask, keep=args.keep,
-                      budget_minutes=args.budget, max_calls=args.max_calls,
+                      budget_minutes=args.budget, max_calls=args.max_calls, shape=args.shape or "auto",
                       max_usd=args.max_usd if args.max_usd is not None else float(models.load_extra(STATE).get("max_usd") or 0))
     decisions = Decisions(save=lambda items: run.write_json("decisions.json", items))
     if resume_info:
         decisions.items = list(resume_info["decisions"])
         mark_resumed(resume_info["dir"], run.dir)
     ctx = Context(run, worker_agent, judge, planner_agent, decisions, options, reviewer=reviewer, panel=panel)
+    ctx.upgrade = models.load_upgrade(STATE)
+    ctx.make_worker = lambda spec: wrap(spec, worker=True)
+    ctx.make_agent = lambda spec: wrap(spec)
+    ctx.model_options = models.with_problems(STATE, installed_models())
+    ctx.roles = dict(choices)
     ctx.usage = usage
     start_visualizer(run)
 

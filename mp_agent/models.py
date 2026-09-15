@@ -120,6 +120,56 @@ def save_extra(state_dir, values):
     _save(state_dir, data)
 
 
+# Roughly strongest first, for offering an upgrade when the workers get stuck. Within a company
+# the order is theirs: Anthropic Haiku < Sonnet < Opus < Fable; OpenAI GPT-5.6 Luna < Terra < Sol < Astra;
+# DeepSeek Flash < Pro.
+# Between companies it is a judgement. A model that matches none of these counts as weaker than all
+# of them (a fast, cheap worker, usually).
+STRENGTH = ["claude:fable", "codex:*astra*", "claude:opus", "codex:*sol*", "claude:sonnet", "codex:*terra*",
+            "codex:gpt-5.5", "antigravity:*opus*", "antigravity:*pro*", "opencode:anthropic/*fable*",
+            "opencode:anthropic/*opus*", "opencode:openai/*", "codex:*luna*", "antigravity:*sonnet*", "qwen:*pro*",
+            "opencode:*deepseek*pro*", "claude:haiku", "qwen:*flash*", "opencode:*deepseek*flash*", "antigravity:*flash*"]
+
+
+def strength(spec):
+    """Lower is stronger; a spec that matches nothing gets the weakest rank."""
+    return next((i for i, pattern in enumerate(STRENGTH) if fnmatch.fnmatch(spec, pattern)), len(STRENGTH))
+
+
+def upgrade_options(current, options, exclude=(), limit=3):
+    """Available models stronger than the current workers, strongest first. The planner and
+    judge are excluded: a worker may never be the model that judges its work."""
+    rank = strength(current)
+    found = [o for o in options
+             if o["spec"] != current and o["spec"] not in exclude and strength(o["spec"]) < rank and not o.get("problem")]
+    return sorted(found, key=lambda o: strength(o["spec"]))[:limit]
+
+
+def account(spec):
+    """Which account a model is paid from: the tool, plus the provider for tools that reach many
+    (cline:inception:..., opencode:openrouter/...). When one model runs out, so do its neighbours."""
+    parts = str(spec or "").split(":")
+    if parts[0] in ("cline", "opencode") and len(parts) > 1:
+        return parts[0] + ":" + parts[1].split("/")[0]
+    return parts[0]
+
+
+def switch_options(current, options, exclude=(), limit=3):
+    """Models to switch to when one cannot be used (out of credit or usage): from another account,
+    as close as possible to its strength, the stronger side first."""
+    rank = strength(current)
+    found = [o for o in options if o["spec"] != current and o["spec"] not in exclude and not o.get("problem")
+             and account(o["spec"]) != account(current)]
+    return sorted(found, key=lambda o: (strength(o["spec"]) > rank, abs(strength(o["spec"]) - rank)))[:limit]
+
+
+def load_upgrade(state_dir):
+    """What to do when the workers get stuck: {"mode": "ask"|"auto"|"never", "to": spec or "", "max": n}."""
+    saved = _load(state_dir).get("upgrade") or {}
+    mode = saved.get("mode") if saved.get("mode") in ("ask", "auto", "never") else "ask"
+    return {"mode": mode, "to": str(saved.get("to") or ""), "max": max(0, int(saved.get("max", 1) or 0))}
+
+
 def resolve_preset(preset, options):
     """The specs a preset would use with the models available here, or (None, what is missing)."""
     specs = [o["spec"] for o in options]
@@ -194,7 +244,8 @@ def available(home=HOME, check_claude_login=True, key_env=None, claude_billing="
         paid_by_key = claude_billing == "api" and bool(key_env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"))
         if logged_in or paid_by_key:
             how = "API key" if paid_by_key else "subscription"
-            for model, name in (("opus", "Claude Opus"), ("sonnet", "Claude Sonnet"), ("haiku", "Claude Haiku")):
+            for model, name in (("fable", "Claude Fable"), ("opus", "Claude Opus"), ("sonnet", "Claude Sonnet"),
+                                ("haiku", "Claude Haiku")):
                 found.append({"spec": f"claude:{model}", "label": f"{name} (Claude Code, {how})"})
     if shutil.which("codex") and os.path.exists(os.path.join(home, ".codex", "auth.json")):
         cache = _read_json(os.path.join(home, ".codex", "models_cache.json")) or {}

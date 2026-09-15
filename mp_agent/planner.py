@@ -17,6 +17,7 @@ Read the project as much as you need (you have read-only tools), then reply with
 
 {
   "mode": "single" or "swarm",
+  "why": "one sentence: why this shape suits this task and this team",
   "summary": "one or two sentences on the approach",
   "contract": {
     "done": ["concrete, checkable statement", "..."],
@@ -32,9 +33,12 @@ Read the project as much as you need (you have read-only tools), then reply with
 }
 
 Rules:
-- Prefer "single". Choose "swarm" only when the work splits into at least two parts that change different files and could be built independently; "subtasks" is ignored for "single".
+- "single" or "swarm" is a trade-off; weigh it for this task and this team, and say why in "why". "subtasks" is ignored for "single".
+  - "swarm" builds parts in parallel, each in its own copy of the project with its own check and quick review; they are merged, and the merged whole then goes through every gate once more. It pays off when the task has two or more independent parts of real size (separate features, pages, modules or commands), each a few passes of work, and most of all when the workers are fast and cheap. A part that gets stuck does not hold the others up.
+  - "single" is one worker on the whole task. It suits small tasks, a single change, and parts that edit the same functions or depend on each other's details, where splitting would only add merges and reviews.
+  - Parts that would all edit one large file can still be a swarm: give an early "scaffold" subtask that file, to add only the loading and hooks the parts need (for example a script tag or import per new file, and a small shared API), and let each part create and own its own new file that depends on the scaffold. Choose this only when separate files suit the project anyway.
 - contract.done: every statement must be checkable. contract.out_of_scope: be generous. List the edge cases, extra validation and hardening a picky reviewer might invent that this task does not need; reviewers are told these are never reasons to block.
-- check: use the project's existing checks when they cover the task. If nothing checks this task yet, set "tests" and make "check" run them.
+- check: use the project's existing checks when they cover the task. If nothing checks this task yet, set "tests" and make "check" run them. When the task changes a web page's JavaScript, also make "check" load the page in a real browser: `mp-agent pagecheck path/to/page.html` (add `--query "?x=1"` for each address the page must work at) fails on any uncaught JavaScript error, which syntax checks and reading the code cannot see.
 - tests: acceptance tests written FIRST from the contract, then frozen so implementers cannot change them. Test only what the contract asks, and only what a script can decide reliably; say in tests.goal which criteria those are. Criteria needing judgement or a look in a browser are left to the reviewers. Check structured files (HTML, JSON, YAML) with a real parser that is already installed (python3's standard library has html.parser and json) rather than grep, which reviewers can always find another hole in. If "check" runs a script that does not exist yet (for example ./agent-check.sh), include that script in tests.files.
 - subtasks: "owns" lists files, or directories ending in "/", relative to the project root. No two subtasks may own overlapping paths, and no subtask may own a tests file. No globs, no "..", no absolute paths. depends_on names subtasks whose merged work this one needs.
 - Every file any subtask will need to create must be owned by exactly one subtask, including shared scaffolding such as package __init__.py files, config files and entry points. Give shared scaffolding to one subtask in the earliest wave (or to a small "scaffold" subtask the others depend on); a worker that writes a file nobody owns has that change thrown away.
@@ -164,14 +168,18 @@ def project_notes(repo):
             f"Tracked files:\n{files if files.strip() else '(the project is empty)'}")
 
 
-def make_plan(ctx, task, repo, check_override=None, attempts=3, memory=""):
+SHAPES = {"solo": "single", "single": "single", "swarm": "swarm"}
+
+
+def make_plan(ctx, task, repo, check_override=None, attempts=3, memory="", shape=None):
     """Ask the planner for a valid plan. Returns (plan, None) or (None, reason)."""
     prompt = f"# The task\n\n{task}\n\n# The project\n\n{project_notes(repo)}"
     team = [(label, getattr(ctx, attr, None)) for label, attr in
             (("workers", "worker"), ("quick reviewer", "reviewer"), ("panel", "panel"), ("final judge", "judge"))]
     prompt += "\n\n# The team\n\n" + "\n".join(f"- {label}: {agent.name}" for label, agent in team if agent) + (
         "\n\nA fast, cheap worker can afford many passes and a swarm of parallel subtasks; a slow or expensive "
-        "one is better given a single, clearly specified unit.")
+        f"one is better given fewer, clearly specified units. Up to {getattr(getattr(ctx, 'options', None), 'workers', 3)} "
+        "parts are built at the same time.")
     if getattr(ctx, "project_rules", ""):
         prompt += ("\n\n" + ctx.project_rules + "\n\nWrite the contract so the work keeps to these rules; put a rule "
                    "in the contract only when this task is likely to run into it.")
@@ -179,6 +187,12 @@ def make_plan(ctx, task, repo, check_override=None, attempts=3, memory=""):
         prompt += ("\n\n# What earlier runs on this project settled\n\nThese were decided by rulings, by the person "
                    "who asks for the work, or by implementers. Keep to them unless this task says otherwise, and "
                    "carry any that apply into the contract.\n\n" + memory)
+    shape = SHAPES.get(shape or "")
+    if shape == "single":
+        prompt += '\n\n# Required shape\n\nThe person chose a solo run: "mode" must be "single".'
+    elif shape == "swarm":
+        prompt += ('\n\n# Required shape\n\nThe person chose a swarm: "mode" must be "swarm", with at least two '
+                   "subtasks. Find the most natural split (a scaffold subtask first if the parts share one file).")
     if check_override:
         prompt += f"\n\n# Required check\n\nThe user requires this check command: `{check_override}`. Use it as \"check\"."
     errors = []
@@ -203,6 +217,8 @@ def make_plan(ctx, task, repo, check_override=None, attempts=3, memory=""):
         if plan is not None and check_override:
             plan["check"] = check_override
         errors = validate(plan, repo)
+        if shape and isinstance(plan, dict) and plan.get("mode") in SHAPES.values() and plan["mode"] != shape:
+            errors.append(f'the person chose {"a solo run" if shape == "single" else "a swarm"}: "mode" must be "{shape}"')
         if not errors:
             return plan, None
         ctx.say(f"   plan rejected ({len(errors)} problem(s)); asking again")
@@ -222,7 +238,11 @@ Then a short reason. Rule for the smallest contract that meets the task; when in
 
 Frozen tests can be wrong too. Read them. If a frozen test would fail on correct work (a bug in the test itself), or demands something the contract does not ask for, also write:
 TEST FIX: <file>: <exactly what is wrong in the test and what it should check instead>
-Only for a real fault in the test; never to excuse work that does not meet the contract. The harness has the test repaired and reviewed, and the implementer keeps the fixed test."""
+Only for a real fault in the test; never to excuse work that does not meet the contract. The harness has the test repaired and reviewed, and the implementer keeps the fixed test.
+
+If the contract is clear and the workers simply cannot get it right (the same kind of mistake keeps coming back after being pointed out), also write:
+UPGRADE: <one sentence on what they keep getting wrong>
+The person may then be offered a stronger worker model."""
 
 REPLAN_SYSTEM = """You wrote the plan and contract for this work. The unit below is stuck even after a ruling. Re-plan it: a clearer goal, a tighter contract and concrete guidance on the approach the implementer should take. It must still own only the same files.
 
@@ -260,12 +280,14 @@ def ruling(ctx, worker, why, feedback):
     worker.test_fixes = tagged(reply.text, "TEST FIX") if reply.ok and worker.spec.frozen else []
     # the reasoning often says exactly how to get unstuck even when no rule changes
     worker.ruling_advice = _advice(reply.text) if reply.ok else ""
+    upgrade = tagged(reply.text, "UPGRADE") if reply.ok else []
+    worker.upgrade_hint = upgrade[0] if upgrade else ""
     return tagged(reply.text, "AMENDMENT") if reply.ok else []
 
 
 def _advice(text):
     lines = [l for l in (text or "").splitlines()
-             if not re.match(r"^[\s*_#>-]*(AMENDMENT|TEST FIX):", l) and l.strip().strip("*_") != "NO AMENDMENT"]
+             if not re.match(r"^[\s*_#>-]*(AMENDMENT|TEST FIX|UPGRADE):", l) and l.strip().strip("*_") != "NO AMENDMENT"]
     return "\n".join(lines).strip()[:3000]
 
 

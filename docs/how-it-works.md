@@ -8,7 +8,8 @@ that a planner, deterministic checks, reviewers and a final judge all agree on.
 ```
 setup     in a git repo: needs a clean tree
           --new or an empty folder: git set up silently; loose files without git: needs --init
-plan      the planner reads the project and writes the plan: single or swarm, a contract
+plan      the planner reads the project and writes the plan: single or swarm (and why;
+          --solo or --swarm decides it for the planner), a contract
           (what "done" means, what is out of scope), the check command, and
           acceptance tests to write first if nothing checks this task yet
 wave 0    a worker writes those tests; the reviewer checks them against the
@@ -17,7 +18,8 @@ single    one unit: implement → check → quick reviewer → panel → judge
 swarm     subtasks own disjoint files; independent ones run in parallel waves,
           each: implement → own check → reviewer; merged after the wave; the
           merged checks run; failures get an integration unit;
-          then the final gates (check → reviewer → panel → audit) on the whole
+          then the final gates (check → reviewer → panel → audit) on the whole;
+          a part that stops lets the rest of its wave finish and be merged
 ```
 
 Everything happens on a branch in a throwaway worktree. The user's checkout is
@@ -33,9 +35,19 @@ escalates when it stops:
   approval (`--churn`, 8)
 - **ruling**: the planner settles what is going round in circles and amends the
   contract, has a wrong frozen test repaired, or gives advice
+- **upgrade**: when the workers seem unable to do it, you're offered a stronger
+  worker model (MODELS → when stuck: ask, auto or never). In the workshop the
+  judge fires the old workers and hires the new ones
 - **re-plan**: the planner rewrites the unit's goal, contract and approach
 - **ask**: the run pauses, sends a desktop notification, shows the question in
   `mp-status` and the workshop, and waits for `mp-agent answer "…"`
+
+When a model can't be used at all (out of credit, out of plan usage, or a free
+tier used up), the question offers **SWITCH TO** buttons next to retry and stop.
+They list models on a different account, as close in strength as possible. The
+switch covers every role that model was playing (workers, quick reviewer, panel)
+for the rest of the job. It never picks the judge's or planner's model for the
+builders.
 
 A safety net remains for runaway spend: `--budget` (180 working minutes; time
 waiting for you does not count) and `--max-calls` (800). Reaching it is

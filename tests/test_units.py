@@ -781,6 +781,48 @@ class Setup(unittest.TestCase):
 
 
 class WorkshopServer(unittest.TestCase):
+    def test_page_files_are_served_from_the_page_folder_only(self):
+        import socket
+        import time as t
+        import urllib.error
+        import urllib.request
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        home, site = tempfile.mkdtemp(prefix="mp-viz-home-"), tempfile.mkdtemp(prefix="mp-viz-page-")
+        write(site, "viz/index.html", "<p>hi</p>")
+        write(site, "viz/eggs/cat.js", "window.cat = 1;")
+        write(site, "secret.js", "nope")
+        env = {**os.environ, "MP_VIZ_PORT": str(port), "MP_HOME": home, "MP_RUNS": os.path.join(home, "runs"),
+               "MP_KEYS_BACKEND": "file", "MP_VIZ_PAGE": os.path.join(site, "viz", "index.html")}
+        viz = os.path.join(os.path.dirname(__file__), "..", "bin", "mp-viz")
+        server = subprocess.Popen([sys.executable, viz, "--no-open"], env=env, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL)
+
+        def get(path):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as r:
+                    return r.status, r.headers.get("Content-Type"), r.read().decode()
+            except urllib.error.HTTPError as exc:
+                return exc.code, None, ""
+            except OSError:
+                return None, None, ""
+
+        try:
+            for _ in range(50):
+                if get("/")[0] == 200:
+                    break
+                t.sleep(0.1)
+            status, kind, body = get("/eggs/cat.js")
+            self.assertEqual((status, body), (200, "window.cat = 1;"))
+            self.assertIn("javascript", kind)
+            self.assertEqual(get("/../secret.js")[0], 404)
+            self.assertEqual(get("/%2e%2e/secret.js")[0], 404)
+            self.assertEqual(get("/missing.js")[0], 404)
+        finally:
+            server.terminate()
+            server.wait(timeout=10)
+
     def test_host_origin_and_keys_guards(self):
         import socket
         import subprocess
@@ -1203,3 +1245,52 @@ class McpServers(unittest.TestCase):
                                    run=lambda cmd, **kw: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0))
         self.assertEqual(added, ["sentry"])
         self.assertEqual(ran, [["cline", "mcp", "install", "sentry", "--yes", "--", "npx", "-y", "s"]])
+
+
+class PageCheck(unittest.TestCase):
+    def test_a_page_that_throws_fails_and_a_good_one_passes(self):
+        from mp_agent import pagecheck
+        if not pagecheck.find_browser():
+            self.skipTest("no Chromium-family browser here")
+        folder = tempfile.mkdtemp(prefix="mp-page-")
+        write(folder, "good.html", "<p id=x></p><script>document.getElementById('x').textContent = location.search;</script>")
+        write(folder, "bad.html", "<script>\nconst ok = 1;\nif (location.search.includes('boom')) missingThing.go();\n</script>")
+        said = []
+        self.assertEqual(pagecheck.check(os.path.join(folder, "good.html"), ["", "?a=1"], 1500, said.append), 0)
+        self.assertEqual(pagecheck.check(os.path.join(folder, "bad.html"), ["?fine=1"], 1500, said.append), 0)
+        self.assertEqual(pagecheck.check(os.path.join(folder, "bad.html"), ["?boom=1"], 1500, said.append), 1)
+        self.assertTrue(any("missingThing is not defined" in s and "line 3" in s for s in said), said)
+
+
+class ShapeFlags(unittest.TestCase):
+    def test_solo_and_swarm_flags(self):
+        from mp_agent import cli
+        self.assertEqual(cli.parser().parse_args(["x", "--swarm"]).shape, "swarm")
+        self.assertEqual(cli.parser().parse_args(["x", "--solo"]).shape, "solo")
+        self.assertIsNone(cli.parser().parse_args(["x"]).shape)
+
+    def test_a_swarm_needs_the_planner(self):
+        import contextlib, io
+        from mp_agent import cli
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["x", "--swarm", "--no-plan"]), 2)
+        self.assertIn("a swarm needs the planner", err.getvalue())
+
+
+class SwitchModels(unittest.TestCase):
+    def test_free_tier_limits_are_out_of_credit(self):
+        from mp_agent.providers import classify
+        self.assertEqual(classify(1, "error: Free tier limit reached. Please upgrade to a paid plan."), "fatal")
+
+    def test_switch_options_leave_the_account_and_stay_close_in_strength(self):
+        from mp_agent import models
+        self.assertEqual(models.account("cline:inception:mercury-2.5"), "cline:inception")
+        self.assertEqual(models.account("opencode:openrouter/deepseek/deepseek-v4-pro"), "opencode:openrouter")
+        self.assertEqual(models.account("claude:opus"), "claude")
+        options = [{"spec": s, "label": s} for s in ("claude:fable", "claude:sonnet", "claude:haiku", "codex:gpt-5.6-terra",
+                                                    "codex:gpt-5.6-sol")]
+        picks = [o["spec"] for o in models.switch_options("claude:opus", options, limit=5)]
+        self.assertEqual(picks[0], "codex:gpt-5.6-sol")        # the nearest from another account, stronger side first
+        self.assertNotIn("claude:sonnet", picks)
+        self.assertEqual(models.switch_options("claude:opus", [], limit=3), [])

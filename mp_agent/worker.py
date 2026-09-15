@@ -78,6 +78,10 @@ class Worker:
         self.test_repairs = 0
         self.tests_repaired = False    # a repair happened since the last gate: the check must run again
         self.ruling_advice = ""       # the planner's reasoning from its last ruling
+        # This unit's own workers. An upgrade replaces them for this unit and for work that starts later;
+        # parts of a swarm already under way keep theirs until they get stuck too.
+        self.agent = ctx.worker
+        self.agent_spec = (getattr(ctx, "roles", None) or {}).get("worker") or getattr(ctx.worker, "name", "")
 
     # --- plumbing ---------------------------------------------------------------------
 
@@ -241,7 +245,7 @@ class Worker:
                     self.say(f"   {name} could not run (exit {reply.status}); running it again")
                     self.rejudge = True
                     return None, True
-                if self.ctx.provider_trouble(self.spec.name, who, reply):
+                if self.ctx.provider_trouble(self.spec.name, who, reply, worker=self):
                     self.rejudge = True
                     return None, True
             return self.result(False, f"NOT approved: {result.detail}"), False
@@ -293,7 +297,7 @@ class Worker:
                 prompt = self.implementer_prompt()
                 run.write_text(self.pass_file("prompt.md"), prompt)
                 with acting("implementer", s.name):
-                    reply = ctx.worker.ask(IMPLEMENTER_SYSTEM, prompt, self.tree)
+                    reply = self.agent.ask(IMPLEMENTER_SYSTEM, prompt, self.tree)
                 run.count("worker_calls")
                 run.write_text(self.pass_file("output.log"), reply.text)
                 self.say(f"   model {int(reply.seconds)}s (exit {reply.status})")
@@ -301,10 +305,10 @@ class Worker:
                     return self.result(False, f"NOT approved: {ctx.stop_reason}")
                 if not reply.ok and classify(reply.status, reply.text) in PROVIDER_TROUBLE:
                     # The provider, not the model's work: same pass again once someone says so.
-                    if ctx.provider_trouble(s.name, ctx.worker.name, reply):
+                    if ctx.provider_trouble(s.name, self.agent.name, reply, worker=self):
                         self.passes -= 1
                         continue
-                    return self.result(False, f"NOT approved: {ctx.worker.name} was unavailable "
+                    return self.result(False, f"NOT approved: {self.agent.name} was unavailable "
                                               f"({classify(reply.status, reply.text)})")
                 if not reply.ok:
                     model_failures += 1

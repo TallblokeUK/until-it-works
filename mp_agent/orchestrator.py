@@ -138,7 +138,8 @@ class Orchestrator:
             recalled = memory.recall(self.state_dir, self.repo)
             if recalled:
                 self.say("   remembering what earlier runs on this project settled")
-            plan, problem = planner.make_plan(ctx, self.task, self.tree, self.check_override, memory=recalled)
+            plan, problem = planner.make_plan(ctx, self.task, self.tree, self.check_override, memory=recalled,
+                                             shape=ctx.options.shape)
             if plan is None:
                 return self.finish(self.outcome(False, f"NOT approved: {problem}", mode=None))
         else:
@@ -154,6 +155,9 @@ class Orchestrator:
         contract = Contract.from_dict(plan["contract"])
         mode = plan["mode"]
         self.say(f"   plan: {mode} — {plan.get('summary', '')}".rstrip(" —"))
+        if str(plan.get("why") or "").strip():
+            chosen = "" if ctx.options.shape == "auto" else " (you chose it)"
+            self.say(f"   why {'solo' if mode == 'single' else 'a swarm'}{chosen}: {str(plan['why']).strip()}")
         for item in contract.done:
             self.say(f"   done: {item}")
         if mode == "swarm":
@@ -304,21 +308,20 @@ class Orchestrator:
                 ctx.unit_state(sid, wave=number)
                 workers.append(Worker(ctx, spec, path))
 
-            def work(worker):
-                result = worker.run()
-                if not result.approved:
-                    ctx.halt(f"subtask {worker.spec.name} stopped: {result.outcome}")
-                return result
-
+            # A part that stops does not stop the others: they finish, and their approved work is
+            # merged and kept, so a resumed run only has the stopped part left to do.
             with ThreadPoolExecutor(max_workers=max(1, ctx.options.workers)) as pool:
-                results = list(pool.map(work, workers)) if workers else []
+                results = list(pool.map(lambda worker: worker.run(), workers)) if workers else []
             failed = [r for r in results if not r.approved]
-            if failed:
-                return "NOT approved: " + "; ".join(f"{r.name}: {r.outcome}" for r in failed)
+            approved = [r.name for r in results if r.approved]
+            for r in failed:
+                self.say(f"   {r.name} stopped: {r.outcome}")
 
-            self.say(f"── merging wave {number}")
-            ctx.run.phase(f"merging wave {number}")
-            for sid in [w.spec.name for w in workers] + to_merge:
+            if approved or to_merge:
+                self.say(f"── merging wave {number}" + (f" (the approved parts: {', '.join(approved + to_merge)})"
+                                                         if failed else ""))
+                ctx.run.phase(f"merging wave {number}")
+            for sid in approved + to_merge:
                 ok, output = gitops.merge(self.tree, f"{self.branch}-{sid}", f"mp-agent: merge subtask {sid}")
                 self.say(f"   merged {sid}" if ok else f"   merge of {sid} failed")
                 if not ok:
@@ -327,12 +330,17 @@ class Orchestrator:
                             f"disjoint; see merge-wave-{number}.log")
                 if sid in to_merge:
                     gitops.branch_delete(self.repo, f"{self.branch}-{sid}")
+            done_ids = set(approved)
             for path, branch in list(self.subtrees):
-                gitops.worktree_remove(self.repo, path)
-                gitops.branch_delete(self.repo, branch)
-            self.subtrees.clear()
+                if any(branch == f"{self.branch}-{sid}" for sid in done_ids):
+                    gitops.worktree_remove(self.repo, path)
+                    gitops.branch_delete(self.repo, branch)
+                    self.subtrees.remove((path, branch))
+            if failed:
+                kept = f"; {', '.join(approved + to_merge)} approved and merged" if approved or to_merge else ""
+                return "NOT approved: " + "; ".join(f"{r.name}: {r.outcome}" for r in failed) + kept
 
-            merged_ids = [w.spec.name for w in workers] + to_merge
+            merged_ids = approved + to_merge
             checks = [subtasks[i].get("check") for i in merged_ids if subtasks[i].get("check")]
             if checks:
                 combined = " && ".join(f"( {c} )" for c in dict.fromkeys(checks))
@@ -402,6 +410,18 @@ class Orchestrator:
                  + (f", {int(ctx.run.waiting_seconds)}s waiting for you" if ctx.run.waiting_seconds else ""))
         self.say(f"logs: {ctx.run.dir}")
         metadata["units"] = ctx.units
+        if getattr(ctx, "upgrades", None):
+            metadata["upgrades"] = list(ctx.upgrades)
+        if getattr(ctx, "switches", None):
+            metadata["switches"] = list(ctx.switches)
+        if getattr(ctx, "upgrades", None) or getattr(ctx, "switches", None):
+            try:
+                with open(os.path.join(ctx.run.dir, "roles.json")) as fh:
+                    roles = json.load(fh)
+            except (OSError, ValueError):
+                roles = {}
+            # the models each role ended the job with
+            ctx.run.write_json("roles.json", {**roles, **{r: s for r, s in ctx.roles.items() if s and r in roles}})
         shots = collect_screenshots(os.path.join(os.path.dirname(self.trees_root), "shots"), ctx.run.dir,
                                     ctx.run.started - 5)
         if shots:

@@ -248,6 +248,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.reply(200, "text/html; charset=utf-8", f.read())
             except OSError as e:
                 self.reply(500, "text/plain", str(e).encode())
+        elif re.match(r"^/[A-Za-z0-9_./-]+\.(js|css|json|png|svg)$", path) and ".." not in path:
+            # the page's own scripts and styles, from its folder only
+            base = os.path.realpath(os.path.dirname(PAGE))
+            full = os.path.realpath(os.path.join(base, path.lstrip("/")))
+            kinds = {"js": "text/javascript; charset=utf-8", "css": "text/css; charset=utf-8",
+                     "json": "application/json", "png": "image/png", "svg": "image/svg+xml"}
+            if not full.startswith(base + os.sep) or not os.path.isfile(full):
+                return self.reply(404, "text/plain", b"not found")
+            with open(full, "rb") as f:
+                self.reply(200, kinds[full.rsplit(".", 1)[1]], f.read())
         elif path == "/api/stop":
             self.reply(200, "text/plain", b"bye")
             threading.Thread(target=lambda: (time.sleep(0.2), os._exit(0))).start()
@@ -294,6 +304,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.reply(400, "text/plain", b"choose where the agents should work")
             if job.get("init"):
                 flags.append("--init")
+            if job.get("shape") in ("solo", "swarm"):
+                flags.append("--" + job["shape"])
             for role in ROLES:
                 if job.get(role):
                     flags += ["--panel-model" if role == "panel" else f"--{role}", str(job[role])]
@@ -495,6 +507,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 args += ["--max-usd", str(wanted["max_usd"])]
             if wanted.get("claude_billing") in ("subscription", "api"):
                 args += ["--claude-billing", wanted["claude_billing"]]
+            if wanted.get("when_stuck") in ("ask", "auto", "never"):
+                args += ["--when-stuck", wanted["when_stuck"], "--upgrade-to", str(wanted.get("upgrade_to") or "")]
             proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
             if proc.returncode != 0:
                 return self.reply(409, "text/plain", (proc.stderr or proc.stdout).encode())

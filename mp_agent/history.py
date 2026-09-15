@@ -64,6 +64,8 @@ def summarize(runs_dir, limit=300, project=None):
             "judge_objections": count(r"final reviewer asked for changes"), "judge_after_panel": missed,
             "rulings": count(r"ruling A\d+:"), "questions": count(r"waiting for you:"),
             "resolution": (meta.get("resolution") or {}).get("action"),
+            "upgrades": [f"{u.get('from')} → {u.get('to')}" for u in meta.get("upgrades") or []],
+            "switches": [f"{s.get('from')} → {s.get('to')}" for s in meta.get("switches") or []],
         })
     projects = {}
     for r in runs:

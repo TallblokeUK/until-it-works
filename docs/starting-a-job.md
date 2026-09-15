@@ -44,6 +44,28 @@ project, a GitHub repository, a new project or a one-off) and which models.
 **START** runs it now; **ADD TO QUEUE** runs it after whatever is already
 running.
 
+## Solo or swarm
+
+A job runs **solo** (one worker on the whole task) or as a **swarm** (the task
+split into parts that are built at the same time, then merged and judged as a
+whole). By default the planner decides, and the log says why. It chooses a swarm
+when there are two or more independent parts of real size, especially with fast
+workers; small or tightly connected changes stay solo.
+
+To decide yourself, set **Shape** in NEW JOB, or pass `--solo` or `--swarm`.
+
+In a swarm:
+
+- **Parts own files.** No two parts may change the same file. When every part
+  would edit one big file, the planner can add a small first "scaffold" part
+  that gives each part its own new file to fill.
+- **A stuck part doesn't stop the others.** They finish, and their approved work
+  is merged and kept. Resuming the job only redoes the part that stopped.
+- **Upgrades happen per part.** If one part's workers are upgraded, that part
+  and any parts not yet started get the stronger model. Parts already going
+  well keep theirs. If they get stuck later, they take the same upgrade, and it
+  isn't counted as a second one.
+
 ### Working on one project
 
 The **PROJECT** picker at the top of the workshop narrows everything to one
@@ -95,6 +117,7 @@ mp-agent start --github you/shop "add CSV export"           # pulls the latest (
 mp-agent start --new --name csv-tool "a CSV cleaning tool"  # a brand-new project in ~/mp-projects
 mp-agent start --oneoff "convert data.xlsx to JSON"         # a throwaway folder; the result is kept there
 mp-agent start --judge opus --worker luna "add CSV export"  # different models for this job only
+mp-agent start --swarm "add the four easter eggs"           # split into parts built in parallel
 ```
 
 `mp-status` shows what's running. `mp-agent answer "…"` answers a question the

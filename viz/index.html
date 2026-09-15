@@ -129,6 +129,10 @@
   #rulesList summary{cursor:pointer;color:var(--gold)}
   #rulesList pre{white-space:pre-wrap;max-height:36vh;overflow:auto;background:#07061a;border:1px solid var(--edge);padding:8px;font-size:15px}
   .protectadd{display:flex;gap:8px;margin:6px 0}
+  .qchoices{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0}
+  .qchoices:empty{display:none}
+  .qchoices button{font-family:var(--crt);font-size:18px;background:var(--gold);color:#1a1230;border:0;padding:4px 10px;cursor:pointer}
+  .qchoices button.plain{background:var(--ink);color:var(--text);border:2px solid var(--edge)}
   .mcpadd{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
   .mcpadd input,.mcpadd select{font:inherit;font-size:16px;background:#0d0b1e;color:#fff;border:2px solid var(--edge);padding:3px 6px}
   .mcpadd #mcpWhat{flex:1;min-width:280px}
@@ -272,6 +276,7 @@
       <label id="jobLocalWrap">Project <small><a href="#" id="jobBrowse">open a folder…</a></small><select id="jobLocal"><option>loading…</option></select></label>
       <label id="jobGithubWrap" hidden>Repo<select id="jobGithub"><option>loading…</option></select></label>
       <label id="jobNameWrap" hidden>Folder name <small>optional</small><input id="jobName" placeholder="my-new-thing"></label>
+      <label>Shape<select id="jobShape"><option value="">auto: the planner decides</option><option value="solo">solo: one worker</option><option value="swarm">swarm: parts in parallel</option></select></label>
       <label>Planner<select id="job-planner"></select></label>
       <label>Workers<select id="job-worker"></select></label>
       <label>Quick reviewer<select id="job-reviewer"></select></label>
@@ -411,6 +416,10 @@
         <label>Panel <small>three lenses before the judge</small><select id="set-panel"></select></label>
         <label>Judge <small>the final audit, the last word</small><select id="set-judge"></select></label>
         <label>Spending cap per job <small>money billed to API keys, in $ (subscriptions aren't counted); blank = none</small><input id="set-cap" inputmode="decimal" placeholder="none"></label>
+        <label>When the workers get stuck <small>after a ruling hasn't helped</small><select id="set-stuck">
+          <option value="ask">offer me a stronger model</option><option value="auto">switch to a stronger model automatically</option>
+          <option value="never">never switch models</option></select></label>
+        <label>Switch to <small>for automatic switching</small><select id="set-upgradeto"><option value="">the strongest available</option></select></label>
       </div>
       <div class="answer"><button type="button" id="saveSettings">SAVE AS DEFAULTS</button>
         <button type="button" class="quick" id="closeSettings">CLOSE</button></div>
@@ -453,6 +462,7 @@
     <div class="question" id="question" hidden>
       <div class="label">WAITING FOR YOU</div>
       <div class="q" id="qtext"></div>
+      <div class="qchoices" id="qChoices"></div>
       <form class="answer" id="answerForm">
         <input id="answerText" autocomplete="off" placeholder="type your answer…">
         <button type="submit">SEND</button>
@@ -564,6 +574,41 @@ function swarmWorker(id) {
 const everyone = () => [...cast, ...Object.values(swarmers), ...(typeof janitor !== "undefined" && janitor.active ? [janitor] : [])];
 function speaker(unit) { return unit && swarmers[unit] ? swarmers[unit] : builder; }
 
+// ---- fired and hired: the workers are upgraded to a stronger model --------------------------------
+// The Judge bangs the gavel, the old builder(s) trudge off stage, and new ones in a new colour walk
+// in to the desks. Started by the log line "upgraded the workers from X to Y"; ?demo=1&fire=1 plays it.
+let hiring = null;
+const HIRED_PALETTES = [
+  { skin: "#e8b98f", body: "#6f4fd8", shade: "#4c34a3", legs: "#2e2a4a", shoes: "#f4c542", eye: "#141024" },
+  { skin: "#f2c9a0", body: "#2f9e6e", shade: "#1f6b4a", legs: "#2e2a4a", shoes: "#ff9a5e", eye: "#141024" },
+];
+function modelNickname(spec) { return String(spec || "").split(":").pop().split("/").pop(); }
+// In a swarm only the stuck part's worker goes (unit); the others keep working.
+function startHiring(t, from, to, unit) {
+  const who = unit && swarmers[unit] ? swarmers[unit] : builder;
+  hiring = { start: t, from, to, stage: 0, who, palette: HIRED_PALETTES[(hiring ? 1 : 0)] };
+  judge.gavelUp = t + 0.8;
+  if (!matchMedia("(prefers-reduced-motion: reduce)").matches) shakeUntil = t + 0.4;
+  say(judge, "YOU'RE FIRED!", "bad", 3);
+  who.sweat = t + 3;
+  setTimeout(() => say(who, `but I'm ${modelNickname(from)}...`, "", 2.5), 900);
+}
+// Returns true while the hiring scene is directing this character.
+function directHiring(c, t) {
+  if (!hiring || c !== hiring.who) return false;
+  const e = t - hiring.start;
+  if (e > 11) { hiring = null; return false; }
+  const offstage = { x: -18, y: c.unit ? c.slot.y : 142 };
+  if (e < 2.4) { c.anim = "slump"; c.tx = c.x; c.ty = c.y; return true; }
+  if (e < 5.8) { goTo(c, offstage, "idle"); c.anim = "slump"; return true; }
+  if (!c.hiredAt || c.hiredAt < hiring.start) {                // off stage: the new hire comes in from the right
+    c.hiredAt = t; c.pal = hiring.palette; c.x = W + 12; c.y = c.unit ? c.slot.y : 142;
+    say(c, `HIRED! ${modelNickname(hiring.to)}`, "ok", 3); setTimeout(() => say(judge, "welcome aboard", "ok", 2.5), 1400);
+  }
+  goTo(c, c.unit ? c.slot : SPOT.desk, "work", true);
+  return true;
+}
+
 // ---- scenery ----------------------------------------------------------------
 const stars = Array.from({ length: 22 }, () => ({ x: rnd(0, 46), y: rnd(0, 32), p: rnd(0, 6) }));
 const books = Array.from({ length: 18 }, (_, i) => ({ c: ["#e85d75","#5ec3f2","#f4c542","#7bdc7b","#b07bf2","#f2915e"][i % 6], h: 6 + (i * 7) % 3 }));
@@ -584,9 +629,7 @@ function drawRoom(t, mode, phaseRole) {
   const wx = 134, wy = 10;
   px(wx - 3, wy - 3, 54, 42, "#3b3470");
   px(wx, wy, 48, 36, "#0a1030");
-  for (const s of stars) if (Math.sin(t * 2 + s.p) > -0.3) px(wx + 1 + s.x, wy + 1 + s.y, 1, 1, "#fff");
-  px(wx + 34, wy + 6, 7, 7, "#fdf3c4"); px(wx + 36, wy + 5, 3, 1, "#fdf3c4"); px(wx + 32, wy + 8, 1, 3, "#fdf3c4");
-  px(wx + 37, wy + 8, 2, 2, "#e9dca0");
+  if (drawWindowSky) drawWindowSky(t, wx, wy);
   px(wx + 23, wy, 2, 36, "#3b3470"); px(wx, wy + 17, 48, 2, "#3b3470");
 
   // neon sign
@@ -644,6 +687,12 @@ function drawRoom(t, mode, phaseRole) {
 }
 
 let phoneUntil = 0;
+let drawWindowSky = null;
+drawWindowSky = (t, wx, wy) => {
+  for (const s of stars) if (Math.sin(t * 2 + s.p) > -0.3) px(wx + 1 + s.x, wy + 1 + s.y, 1, 1, "#fff");
+  px(wx + 34, wy + 6, 7, 7, "#fdf3c4"); px(wx + 36, wy + 5, 3, 1, "#fdf3c4"); px(wx + 32, wy + 8, 1, 3, "#fdf3c4");
+  px(wx + 37, wy + 8, 2, 2, "#e9dca0");
+};
 function drawExtras(t, role) {
   // the Architect's drafting board, next to the bench
   px(214, 104, 20, 14, "#1d3f7a"); px(215, 105, 18, 12, "#2c5aa8");
@@ -912,6 +961,7 @@ function onLine(line, t) {
   if ((m = line.match(/^\s*frozen: /))) { say(checker, "tests frozen!", "ok", 3); return; }
   if ((m = line.match(/ruling (A\d+): /))) { judge.gavelUp = t + 0.6; shakeUntil = t + 0.3; say(judge, `RULING ${m[1]}`, "ok", 4); return; }
   if (/re-planned:/.test(line)) { say(judge, "new plan!", "ok", 3); return; }
+  if ((m = line.match(/(?:upgraded|switched) the workers(?: and [a-z ]+?)? from (\S+) to (\S+)/))) { startHiring(t, m[1], m[2], unit); return; }
   if (/asking the planner/.test(line)) { say(me, "judge? help?", "", 3); return; }
   if (/^\s*waiting for you: /.test(line)) { say(me, "we need a human!", "bad", 6); phoneUntil = t + 600; return; }
   if (/^\s*you answered: /.test(line)) { say(me, "thanks, boss!", "ok", 3); phoneUntil = 0; return; }
@@ -1019,11 +1069,21 @@ function renderHud() {
   $("stopRun").hidden = !(S.live && !DEMO);
   const q = S.live && S.question && S.question.question;
   $("question").hidden = !q;
-  if (q && $("qtext").textContent !== S.question.question) {
-    $("qtext").textContent = S.question.question;
+  const shown = q && (S.question.choices || []).length ? q.replace(/\s*Reply '[\s\S]*$/, "") : q;
+  if (q && $("qtext").textContent !== shown) {
+    $("qtext").textContent = shown;       // with buttons, the "Reply 'x' for ..." part is only for the terminal
     $("answerStatus").innerHTML = 'or in a terminal: <code>mp-agent answer "…"</code>';
     const retryable = /reply 'retry'/.test(S.question.question);
     $("quickRetry").hidden = $("quickStop").hidden = !retryable;
+    // a question that offers choices (such as upgrading stuck workers) gets a button for each
+    const box = $("qChoices"); box.innerHTML = "";
+    for (const c of S.question.choices || []) {
+      const b = document.createElement("button"); b.type = "button"; b.textContent = c.label;
+      if (!/^upgrade /.test(c.answer)) b.className = "plain";
+      if (c.detail) b.title = c.detail;
+      b.onclick = () => sendAnswer(c.answer);
+      box.appendChild(b);
+    }
   }
   const m = S.meta || {};
   const finished = !S.live && S.run && m.outcome !== undefined;
@@ -1131,6 +1191,7 @@ function decide(t) {
   const role = S.live ? roleFor(S.phase) : null;
   const party = celebrateUntil > t;
   for (const c of cast) {
+    if (directHiring(c, t)) continue;
     if (c.visit && c.visit.until > t) { goTo(c, c.visit.spot, "work", c.id === "builder"); continue; }
     if (c.intern) {
       if (party && finalKind === "ok" && c.x > 0) { c.anim = "dance"; c.tx = c.x; c.ty = c.y; continue; }
@@ -1176,6 +1237,7 @@ function decideSwarm(t, role) {
   const list = Object.values(swarmers);
   const swarming = S.live && (role === "swarm" || role === "merge" || list.some((c) => c.state === "working"));
   for (const c of list) {
+    if (directHiring(c, t)) continue;
     if (c.visit && c.visit.until > t) { c.carry = false; goTo(c, c.visit.spot, "work", true); continue; }
     if (celebrateUntil > t && finalKind === "ok" && c.x > 0) { c.anim = "dance"; c.tx = c.x; c.ty = c.y; c.carry = false; continue; }
     if (!swarming) { c.carry = false; goTo(c, { x: -16, y: c.slot.y }, "idle", true); continue; }
@@ -1209,6 +1271,9 @@ function move(c, dt) {
 // ---- main loop ------------------------------------------------------------------
 let lastT = performance.now() / 1000, frames = 0;
 const DEBUG = new URLSearchParams(location.search).has("debug");
+const EGG_UPDATE = [];
+const EGG_DRAW = [];
+const JUDGE_CLICK_HOOKS = [];
 function frame() {
   // dt is capped so a tab returning from the background does not teleport
   // everyone, but loosely enough that a slow frame rate still gets them there.
@@ -1217,6 +1282,7 @@ function frame() {
   decide(t);
   decideSwarm(t, S.live ? roleFor(S.phase) : null);
   decideJanitor(t);
+  for (const f of EGG_UPDATE) f(t, dt);
   for (const c of everyone()) move(c, dt);
   stepParts(dt, t);
   if (Math.random() < 0.05) monitorLines[Math.floor(rnd(0, monitorLines.length))] = rnd(3, 17);
@@ -1237,6 +1303,7 @@ function frame() {
     drawChar(shown, t, b.a);
   }
   drawParts(t);
+  for (const f of EGG_DRAW) f(t);
   if (!S.live && !(celebrateUntil > t) && !janitor.active) { ctx.globalAlpha = 0.25; px(0, 0, W, H, "#050418"); ctx.globalAlpha = 1; }
   ctx.restore();
   placeBubbles(now);
@@ -1453,7 +1520,7 @@ $("openHistory").addEventListener("click", async () => {
       bar("rulings", g.rulings) + bar("questions for you", g.questions);
     $("historyRuns").innerHTML = "<tr><th>when</th><th>project</th><th>task</th><th>result</th><th>passes</th><th>min</th><th>$</th></tr>" +
       h.runs.slice(0, 40).map((r) => `<tr data-run="${esc(r.run)}"><td>${esc(r.run.slice(4, 6))}/${esc(r.run.slice(6, 8))} ${esc(r.run.slice(9, 11))}:${esc(r.run.slice(11, 13))}</td><td>${esc(r.project)}</td>` +
-        `<td>${esc(r.task)}</td><td>${r.approved ? "approved" : "stopped"}${r.resolution ? " · " + esc(r.resolution) : ""}</td>` +
+        `<td>${esc(r.task)}</td><td>${r.approved ? "approved" : "stopped"}${r.resolution ? " · " + esc(r.resolution) : ""}${(r.upgrades || []).length ? " · upgraded " + esc(r.upgrades.join(", ")) : ""}${(r.switches || []).length ? " · switched " + esc(r.switches.join(", ")) : ""}</td>` +
         `<td>${r.passes}</td><td>${Math.round(r.seconds / 60)}</td><td>${r.billed_usd.toFixed(3)}</td></tr>`).join("");
     for (const tr of $("historyRuns").querySelectorAll("tr[data-run]"))
       tr.onclick = () => { selectedRun = tr.dataset.run; $("historyPanel").hidden = true; refreshTabs(); };
@@ -1489,7 +1556,7 @@ $("saveMemory").addEventListener("click", async () => {
 
 function jobBody() {
   const kind = jobKind();
-  return { task: $("jobTask").value, kind, name: $("jobName").value, max_usd: $("jobCap").value.trim(),
+  return { task: $("jobTask").value, kind, name: $("jobName").value, max_usd: $("jobCap").value.trim(), shape: $("jobShape").value,
            value: kind === "local" ? $("jobLocal").value : kind === "github" ? $("jobGithub").value : "",
            ...Object.fromEntries(ROLE_NAMES.map((role) => [role, $("job-" + role).value])) };
 }
@@ -1842,6 +1909,7 @@ if (new URLSearchParams(location.search).has("newjob")) setTimeout(() => $("open
   // after the rest of the script has run, so selectedRun exists
   if (params.get("run")) setTimeout(() => { selectedRun = params.get("run"); refreshTabs(); }, 0);
   if (params.has("sweepdemo")) setTimeout(() => sendJanitor(["worktrees", "shots", "orphan_runs"]), 800);
+  if (params.has("fire")) setTimeout(() => startHiring(performance.now() / 1000, "cline:inception:mercury-2.5", "claude:opus"), 2500);
   const button = { history: "openHistory", memory: "openMemory", queue: "openQueue", models: "openSettings", setup: "openSetup",
                    changes: "viewChangesBtn" }[params.get("open")];
   if (button) setTimeout(() => $(button).click(), 2500);
@@ -1918,6 +1986,11 @@ $("openSettings").addEventListener("click", async () => {
     fillSettings();
     fillPresets();
     $("set-cap").value = modelInfo.max_usd ? String(modelInfo.max_usd) : "";
+    const up = modelInfo.upgrade || { mode: "ask", to: "" };
+    $("set-stuck").value = up.mode;
+    $("set-upgradeto").innerHTML = '<option value="">the strongest available</option>';
+    for (const o of modelInfo.available) { const opt = document.createElement("option"); opt.value = o.spec; opt.textContent = o.label; $("set-upgradeto").appendChild(opt); }
+    $("set-upgradeto").value = up.to || "";
     $("settingsStatus").textContent = "The planner and judge can't be the workers' own model. To change them for one job only, use NEW JOB.";
   } catch (e) { $("settingsStatus").textContent = "could not list models: the visualizer server is not running"; }
 });
@@ -1926,6 +1999,8 @@ $("saveSettings").addEventListener("click", async () => {
   const preset = $("set-preset").value;
   const body = preset ? { preset } : Object.fromEntries(ROLE_NAMES.map((role) => [role, $("set-" + role).value]));
   body.max_usd = $("set-cap").value.trim() === "" ? 0 : $("set-cap").value.trim();
+  body.when_stuck = $("set-stuck").value;
+  body.upgrade_to = $("set-upgradeto").value;
   try {
     const res = await fetch("api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     $("settingsStatus").textContent = res.ok ? "saved: the next runs use these" : `not saved: ${await res.text()}`;
@@ -2170,8 +2245,22 @@ async function poll() {
   }
   setTimeout(poll, DEMO ? 500 : 1000);
 }
+const canvas = $("scene");
+canvas.addEventListener("click", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = ((e.clientX - rect.left) / rect.width) * 320;
+  const y = ((e.clientY - rect.top) / rect.height) * 180;
+  // the whole Judge counts, from the wig down to the feet (c.y is where the feet stand)
+  if (Math.abs(x - judge.x) < 7 && y > judge.y - 21 && y < judge.y + 3) {
+    for (const f of JUDGE_CLICK_HOOKS) f(performance.now() / 1000);
+  }
+});
 poll();
 requestAnimationFrame(frame);
 </script>
+<script src="eggs/dance.js"></script>
+<script src="eggs/daynight.js"></script>
+<script src="eggs/cat.js"></script>
+<script src="eggs/judge.js"></script>
 </body>
 </html>

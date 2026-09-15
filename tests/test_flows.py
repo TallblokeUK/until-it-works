@@ -210,6 +210,67 @@ class Escalation(unittest.TestCase):
         self.assertEqual(builder.count("implement"), 1)
         self.assertEqual(auditor.count("audit"), 1)
 
+    def stuck_setup(self, mode, ruling="NO AMENDMENT", answer_with=None, replan=None):
+        repo = make_repo()
+        weak = Script("weak", implement=lambda p, cwd: write(cwd, "done.txt", "ko\n") or "same mistake", review=approve,
+                      panel=approve)
+        strong = Script("claude:opus", implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "fixed properly",
+                        review=approve, panel=approve)
+        lead = Script(plan=lambda *a: plan_reply(single()), ruling=lambda *a: ruling,
+                      replan=replan or (lambda *a: self.fail("should have upgraded before re-planning")),
+                      question=lambda *a: "QUESTION: ?")
+        ctx = context(weak, Script(audit=approve), lead, patience=2)
+        ctx.upgrade = {"mode": mode, "to": "", "max": 1}
+        made = []
+        ctx.make_worker = lambda spec: made.append(spec) or strong
+        ctx.model_options = [{"spec": "claude:sonnet", "label": "Claude Sonnet"}, {"spec": "claude:opus", "label": "Claude Opus"},
+                             {"spec": "claude:haiku", "label": "Claude Haiku"}]
+        ctx.roles = {"worker": "cline:inception:mercury-2.5", "planner": "claude:sonnet", "judge": "claude:sonnet"}
+        if answer_with:
+            def person():
+                if wait_for(os.path.join(ctx.run.dir, "question.json")):
+                    with open(os.path.join(ctx.run.dir, "question.json")) as fh:
+                        self.asked = json.load(fh)
+                    answer(ctx, {"answer": answer_with})
+            threading.Thread(target=person, daemon=True).start()
+        return repo, ctx, made, strong
+
+    def test_stuck_workers_are_upgraded_automatically_when_set_up_so(self):
+        repo, ctx, made, strong = self.stuck_setup("auto")
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertEqual(made, ["claude:opus"])                  # the strongest available that is not the judge
+        self.assertIn("upgraded the workers from cline:inception:mercury-2.5 to claude:opus (automatically)", log(ctx))
+        self.assertEqual(on_branch(repo, result, "done.txt"), "ok\n")
+        self.assertEqual(json.loads(ctx.run.read_text("metadata.json"))["upgrades"][0]["to"], "claude:opus")
+
+    def test_the_person_is_offered_stronger_workers_and_chooses(self):
+        repo, ctx, made, strong = self.stuck_setup("ask", answer_with="upgrade opus")
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertEqual(made, ["claude:opus"])
+        labels = [c["label"] for c in self.asked["choices"]]
+        self.assertIn("KEEP TRYING", labels)
+        self.assertTrue(any(c["answer"] == "upgrade claude:opus" for c in self.asked["choices"]))
+        self.assertFalse(any("sonnet" in c["answer"] for c in self.asked["choices"]))    # the judge is never offered
+        self.assertIn("Upgrade the workers for the rest of this job?", self.asked["question"])
+
+    def test_planner_saying_upgrade_offers_it_straight_after_the_ruling(self):
+        repo, ctx, made, strong = self.stuck_setup("auto", ruling="NO AMENDMENT\nUPGRADE: they keep writing ko instead of ok")
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertEqual(made, ["claude:opus"])
+        self.assertNotIn("the planner made no amendment but gave advice", log(ctx))
+
+    def test_never_upgrading_goes_on_to_the_re_plan(self):
+        replans = []
+        repo, ctx, made, strong = self.stuck_setup(
+            "never", replan=lambda *a: replans.append(1) or '```json\n{"goal": "g", "done": ["done.txt says ok"], "guidance": "x"}\n```')
+        ctx.options.ask = False
+        orchestrate(ctx, repo)
+        self.assertEqual(made, [])
+        self.assertTrue(replans)
+
     def test_ruling_without_amendment_passes_its_advice_on_before_asking(self):
         repo = make_repo()
 
@@ -398,7 +459,7 @@ class Resume(unittest.TestCase):
         ctx2, result2 = self.resume(ctx, repo, trees, second)
         self.assertTrue(result2["approved"], log(ctx2))
         text = log(ctx2)
-        self.assertIn("a: already approved; merging it", text)
+        self.assertIn("a: already approved and merged", text)      # merged when its wave ended, though b stopped
         self.assertNotIn("[a] ── pass", text)
         for name in "abc":
             self.assertEqual(sh(repo, "git", "show", f"{result['branch']}:{name}.txt"), name)
@@ -595,6 +656,127 @@ class Swarm(unittest.TestCase):
         result = orchestrate(ctx, repo)
         self.assertFalse(result["approved"])
         self.assertIn("NOT approved", result["outcome"])
+
+
+    def test_a_stopped_part_does_not_stop_the_others(self):
+        repo = make_repo()
+
+        def implement(prompt, cwd):
+            if re.search(r"# Task\n\nwrite a\.txt", prompt):
+                write(cwd, "a.txt", "a")
+                return "wrote a"
+            return "b never manages it"
+
+        builder = Script(implement=implement, review=approve, panel=approve)
+        lead = Script(plan=lambda *a: plan_reply(self.PLAN), ruling=lambda *a: "NO AMENDMENT",
+                      replan=lambda *a: "no", question=lambda *a: "QUESTION: ?")
+        ctx = context(builder, Script(audit=approve), lead, patience=2, ask=False, workers=2)
+        result = orchestrate(ctx, repo)
+        text = log(ctx)
+        self.assertFalse(result["approved"])
+        self.assertEqual(ctx.units["a"]["state"], "approved", text)
+        self.assertIn("   b stopped: NOT approved", text)
+        self.assertIn("a approved and merged", result["outcome"])
+        self.assertEqual(on_branch(repo, result, "a.txt"), "a")          # the finished part is kept
+        self.assertNotIn("── wave 2/2", text)                             # c needs b, so it never starts
+
+
+class Shape(unittest.TestCase):
+    def test_the_persons_choice_of_solo_is_enforced(self):
+        repo = make_repo({"README": "x"})
+        replies = [dict(Swarm.PLAN, why="three parts"), single(why="one small change")]
+        lead = Script(plan=lambda *a: plan_reply(replies.pop(0)))
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done", review=approve,
+                         panel=approve)
+        ctx = context(builder, Script(audit=approve), lead, shape="solo")
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        prompts = [c[1] for c in lead.calls if c[0] == "plan"]
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("The person chose a solo run", prompts[0])
+        self.assertIn('the person chose a solo run: "mode" must be "single"', prompts[1])
+        self.assertIn("why solo (you chose it): one small change", log(ctx))
+
+    def test_the_planner_says_why_when_it_decides(self):
+        repo = make_repo({"README": "x"})
+        lead = Script(plan=lambda *a: plan_reply(single(why="a one-line fix")))
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done", review=approve,
+                         panel=approve)
+        ctx = context(builder, Script(audit=approve), lead)
+        self.assertTrue(orchestrate(ctx, repo)["approved"], log(ctx))
+        self.assertIn("why solo: a one-line fix", log(ctx))
+        prompt = next(c[1] for c in lead.calls if c[0] == "plan")
+        self.assertNotIn("Required shape", prompt)
+        self.assertIn("parts are built at the same time", prompt)
+
+
+class SwarmUpgrades(unittest.TestCase):
+    def test_an_upgrade_is_for_the_stuck_part_and_later_work_and_others_adopt_it_when_stuck(self):
+        from mp_agent.contract import Contract
+        from mp_agent.worker import UnitSpec, Worker
+        weak, strong = Script("weak"), Script("claude:opus")
+        ctx = context(weak, Script(audit=approve), Script())
+        ctx.upgrade = {"mode": "auto", "to": "", "max": 1}
+        made = []
+        ctx.make_worker = lambda spec: made.append(spec) or strong
+        ctx.model_options = [{"spec": "claude:opus", "label": "Claude Opus"}, {"spec": "claude:sonnet", "label": "Claude Sonnet"}]
+        ctx.roles = {"worker": "cline:inception:mercury-2.5", "planner": "claude:sonnet", "judge": "claude:sonnet"}
+        tree = make_repo()
+        part = lambda name: Worker(ctx, UnitSpec(name=name, goal="g", contract=Contract(["x"], []), check=None,
+                                                 owns=[f"{name}.txt"]), tree)
+        a, b = part("a"), part("b")
+        self.assertTrue(ctx.offer_upgrade(b, "stuck", ""))
+        self.assertIs(b.agent, strong)
+        self.assertIs(a.agent, weak)                         # a was doing fine and keeps its workers
+        self.assertIs(part("c").agent, strong)               # work that starts later gets the new ones
+        self.assertTrue(ctx.offer_upgrade(a, "stuck", ""))  # a gets stuck too: same upgrade, not a second one
+        self.assertIs(a.agent, strong)
+        self.assertEqual(made, ["claude:opus"])
+        self.assertEqual(len(ctx.upgrades), 1)
+        self.assertIn("[a]    upgraded the workers from cline:inception:mercury-2.5 to claude:opus (already chosen",
+                      log(ctx))
+
+
+class OutOfCredit(unittest.TestCase):
+    def test_a_model_out_of_credit_can_be_switched_for_every_role_it_plays(self):
+        repo = make_repo({"README": "x"})
+        broke = Reply("error: Free tier limit reached. Please upgrade to a paid plan to continue using the service.",
+                      1, 0.01)
+        builder = Script("mercury", implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done")
+        reviewer = Script("mercury", review=lambda *a: broke)
+        panel = Script("mercury", panel=lambda *a: broke)
+        fresh = Script("luna", implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done", review=approve,
+                       panel=approve)
+        ctx = context(builder, Script("sonnet", audit=approve), Script(plan=lambda *a: plan_reply(single())),
+                      reviewer=reviewer, panel=panel)
+        ctx.roles = {"worker": "cline:inception:mercury-2.5", "reviewer": None, "panel": None,
+                     "planner": "claude:sonnet", "judge": "claude:sonnet"}
+        ctx.model_options = [{"spec": s, "label": s} for s in
+                             ("claude:sonnet", "claude:opus", "codex:gpt-5.6-luna", "cline:inception:mercury-coder")]
+        made = []
+        ctx.make_worker = lambda spec: made.append(("worker", spec)) or fresh
+        ctx.make_agent = lambda spec: made.append(("agent", spec)) or fresh
+        asked = {}
+
+        def person():
+            if wait_for(os.path.join(ctx.run.dir, "question.json")):
+                with open(os.path.join(ctx.run.dir, "question.json")) as fh:
+                    asked.update(json.load(fh))
+                answer(ctx, {"answer": "switch codex:gpt-5.6-luna"})
+        threading.Thread(target=person, daemon=True).start()
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        offered = [c["answer"] for c in asked["choices"]]
+        self.assertIn("switch codex:gpt-5.6-luna", offered)
+        self.assertIn("switch claude:opus", offered)
+        self.assertNotIn("switch claude:sonnet", offered)                  # the judge may not review its own work
+        self.assertNotIn("switch cline:inception:mercury-coder", offered)  # the same account is out of credit too
+        self.assertEqual(offered[-2:], ["retry", "stop"])
+        self.assertEqual(sorted(made), [("agent", "codex:gpt-5.6-luna"), ("agent", "codex:gpt-5.6-luna"),
+                                        ("worker", "codex:gpt-5.6-luna")])
+        self.assertIn("switched the workers and quick reviewer and panel from cline:inception:mercury-2.5 to "
+                      "codex:gpt-5.6-luna", log(ctx))
+        self.assertEqual(result.get("switches", [{}])[0].get("to"), "codex:gpt-5.6-luna")
 
 
 class WaveZero(unittest.TestCase):

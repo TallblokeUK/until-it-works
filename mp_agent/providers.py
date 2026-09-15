@@ -30,7 +30,7 @@ FATAL = re.compile(r"invalid api key|incorrect api key|api key (is )?(missing|in
                    r"insufficient (funds|credits?|balance|quota)|credit balance (is )?too low|"
                    r"payment required|usage limit reached|hit your (usage )?limit|out of credits|"
                    r"purchase more credits|exceeded your (current )?quota|individual quota reached|"
-                   r"upgrade your subscription", re.I)
+                   r"upgrade your subscription|free tier limit|upgrade to a paid plan", re.I)
 VERDICT = re.compile(r"^[\s*_#>]*VERDICT:\s*(APPROVED|CHANGES REQUIRED)[\s*_]*$", re.M)
 
 # Linux caps a single argv string at 128 KiB; cline takes the prompt as one.
