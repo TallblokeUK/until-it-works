@@ -914,3 +914,17 @@ class Launchers(unittest.TestCase):
             self.assertEqual(fh.read(), "my own command\n")
         with mock.patch.object(launchers.shutil, "which", return_value=None):
             self.assertEqual({t: w for t, _, w in launchers.install(home)}["gemini"], "up to date")
+
+
+class Answers(unittest.TestCase):
+    def test_a_half_written_answer_is_waited_for_not_a_crash(self):
+        from mp_agent.context import Context
+        folder = tempfile.mkdtemp(prefix="mp-answer-")
+        path = os.path.join(folder, "answer.json")
+        self.assertIsNone(Context._read_answer(path))            # not there yet
+        write(folder, "answer.json", "")
+        self.assertIsNone(Context._read_answer(path))            # created, nothing in it yet
+        write(folder, "answer.json", '{"answer": "ye')
+        self.assertIsNone(Context._read_answer(path))            # halfway through
+        write(folder, "answer.json", '{"answer": " yes "}')
+        self.assertEqual(Context._read_answer(path), "yes")

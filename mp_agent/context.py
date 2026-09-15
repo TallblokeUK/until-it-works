@@ -195,6 +195,16 @@ class Context:
         return bool(answer) and answer.strip().lower().split()[0].strip(".,!") in (
             "retry", "yes", "y", "continue", "carry", "go", "ok", "wait", "resume")
 
+    @staticmethod
+    def _read_answer(path):
+        """The answer once the file is complete, else None. mp-agent and the workshop write it in
+        one step, but something writing it by hand can be caught halfway: wait for the rest."""
+        try:
+            with open(path) as fh:
+                return str(json.load(fh).get("answer") or "").strip()
+        except (OSError, ValueError, AttributeError):
+            return None
+
     def ask_person(self, unit, question):
         if not self.options.ask:
             self.say(f"   needs a decision but asking is off: {question}")
@@ -212,12 +222,13 @@ class Context:
             self.notifier("mp-agent needs you", question)
             started = time.time()
             try:
-                while not os.path.exists(answer_path):
+                answer = None
+                while answer is None:
                     if self.stop.is_set():
                         return None
-                    time.sleep(self.options.answer_poll)
-                with open(answer_path) as fh:
-                    answer = str(json.load(fh).get("answer") or "").strip()
+                    answer = self._read_answer(answer_path)
+                    if answer is None:
+                        time.sleep(self.options.answer_poll)
             finally:
                 run.waiting_seconds += time.time() - started
                 for name in ("question.json", "answer.json"):

@@ -15,6 +15,14 @@ from mp_agent.providers import Reply
 CHECK = "test -f done.txt && grep -q ok done.txt"
 
 
+def answer(ctx, body):
+    """What `mp-agent answer` does: write the answer in one step, never half a file."""
+    tmp = os.path.join(ctx.run.dir, "answer.json.tmp")
+    with open(tmp, "w") as fh:
+        json.dump(body, fh)
+    os.replace(tmp, os.path.join(ctx.run.dir, "answer.json"))
+
+
 def plan_reply(plan):
     return "Here is the plan.\n```json\n" + json.dumps(plan) + "\n```"
 
@@ -164,8 +172,7 @@ class Escalation(unittest.TestCase):
 
         def person():
             if wait_for(os.path.join(ctx.run.dir, "question.json")):
-                with open(os.path.join(ctx.run.dir, "answer.json"), "w") as fh:
-                    json.dump({"answer": "yes, plain ok is fine"}, fh)
+                answer(ctx, {"answer": "yes, plain ok is fine"})
 
         threading.Thread(target=person, daemon=True).start()
         result = orchestrate(ctx, repo)
@@ -254,8 +261,7 @@ class ProviderTrouble(unittest.TestCase):
 
         def person():
             if wait_for(os.path.join(ctx.run.dir, "question.json")):
-                with open(os.path.join(ctx.run.dir, "answer.json"), "w") as fh:
-                    json.dump({"answer": "retry"}, fh)
+                answer(ctx, {"answer": "retry"})
 
         threading.Thread(target=person, daemon=True).start()
         result = orchestrate(ctx, repo)
@@ -475,8 +481,7 @@ class NewTools(unittest.TestCase):
 
         def person():
             if wait_for(os.path.join(ctx.run.dir, "question.json")):
-                with open(os.path.join(ctx.run.dir, "answer.json"), "w") as fh:
-                    json.dump({"answer": "raise it to 5"}, fh)
+                answer(ctx, {"answer": "raise it to 5"})
 
         threading.Thread(target=person, daemon=True).start()
         result = orchestrate(ctx, repo)
