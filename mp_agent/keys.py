@@ -34,6 +34,8 @@ PROVIDERS = {
                    "for": "hundreds of models through OpenCode (opencode:openrouter/...)"},
     "google": {"name": "Google (Gemini)", "env": "GEMINI_API_KEY", "url": "https://aistudio.google.com/apikey",
                "for": "the Gemini CLI, and Gemini models through OpenCode"},
+    "context7": {"name": "Context7", "env": "CONTEXT7_API_KEY", "url": "https://context7.com/dashboard",
+                 "for": "the Context7 docs server (optional: higher limits than without a key)"},
 }
 
 

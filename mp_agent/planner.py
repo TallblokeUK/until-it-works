@@ -172,6 +172,9 @@ def make_plan(ctx, task, repo, check_override=None, attempts=3, memory=""):
     prompt += "\n\n# The team\n\n" + "\n".join(f"- {label}: {agent.name}" for label, agent in team if agent) + (
         "\n\nA fast, cheap worker can afford many passes and a swarm of parallel subtasks; a slow or expensive "
         "one is better given a single, clearly specified unit.")
+    if getattr(ctx, "project_rules", ""):
+        prompt += ("\n\n" + ctx.project_rules + "\n\nWrite the contract so the work keeps to these rules; put a rule "
+                   "in the contract only when this task is likely to run into it.")
     if memory.strip():
         prompt += ("\n\n# What earlier runs on this project settled\n\nThese were decided by rulings, by the person "
                    "who asks for the work, or by implementers. Keep to them unless this task says otherwise, and "
@@ -245,7 +248,8 @@ def situation(worker, why, feedback):
                "so they never reached the disk. That is usually the reason it seems not to be making progress."
                if reverts else "")
             + f"\n\n{spec.contract.render()}\n\n{worker.ctx.decisions.render(spec.name)}\n\n"
-            f"# Why it is stuck\n\n{why}\n\n# The latest feedback it was given\n\n{feedback[-6000:]}")
+            + (f"{worker.ctx.project_rules}\n\n" if getattr(worker.ctx, "project_rules", "") else "")
+            + f"# Why it is stuck\n\n{why}\n\n# The latest feedback it was given\n\n{feedback[-6000:]}")
 
 
 def ruling(ctx, worker, why, feedback):

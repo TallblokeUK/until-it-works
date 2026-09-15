@@ -176,8 +176,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/history":
             return self.reply(200, "application/json",
                               json.dumps(history.summarize(RUNS, project=query("project"))).encode())
+        if path == "/api/rules":
+            wanted = query("project") or ""
+            known = [p["path"] for p in projects.list_projects(RUNS, alive, projects.opened(STATE))]
+            if not any(projects.same(p, wanted) for p in known):
+                return self.reply(404, "text/plain", b"not a project the workshop knows")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            proc = subprocess.run([sys.executable, entry, "rules", wanted, "--json"], capture_output=True, text=True,
+                                  timeout=30)
+            return self.reply(200 if proc.returncode == 0 else 500, "application/json",
+                              (proc.stdout or json.dumps({"error": proc.stderr[-300:]})).encode())
+        if path == "/api/repo":
+            wanted = query("project") or ""
+            known = [p["path"] for p in projects.list_projects(RUNS, alive, projects.opened(STATE))]
+            if not any(projects.same(p, wanted) for p in known):
+                return self.reply(404, "text/plain", b"open the folder first")
+            from mp_agent import repoinfo
+            return self.reply(200, "application/json", json.dumps(repoinfo.inspect(wanted, STATE)).encode())
+        if path == "/api/browse":
+            from mp_agent import repoinfo
+            return self.reply(200, "application/json",
+                              json.dumps(repoinfo.browse(query("path") or HOME, HOME, query("hidden") == "1")).encode())
+        if path == "/api/mcp":
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            wanted = query("project")
+            proc = subprocess.run([sys.executable, entry, "mcp", "list", "--json", *(["--project", wanted] if wanted else [])],
+                                  capture_output=True, text=True, timeout=30)
+            return self.reply(200 if proc.returncode == 0 else 500, "application/json", proc.stdout.encode() or b"{}")
+        if path == "/api/github":
+            from mp_agent import repoinfo
+            return self.reply(200, "application/json", json.dumps(repoinfo.github_account()).encode())
         if path == "/api/projects":
-            return self.reply(200, "application/json", json.dumps(projects.list_projects(RUNS, alive)).encode())
+            return self.reply(200, "application/json", json.dumps(projects.list_projects(RUNS, alive, projects.opened(STATE))).encode())
         if path == "/api/memory":
             from urllib.parse import parse_qs, urlparse
             wanted = (parse_qs(urlparse(self.path).query).get("id") or [None])[0]
@@ -332,7 +362,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             folder = os.path.realpath(meta.get("project") or "")
             if body.get("project"):
                 # only a folder a run has worked in, never an arbitrary path
-                known = [p["path"] for p in projects.list_projects(RUNS, alive)]
+                known = [p["path"] for p in projects.list_projects(RUNS, alive, projects.opened(STATE))]
                 folder = next((p for p in known if projects.same(p, str(body["project"]))), "")
             if not folder.startswith(os.path.realpath(HOME) + os.sep) or not os.path.isdir(folder):
                 return self.reply(404, "text/plain", b"no such folder")
@@ -369,6 +399,54 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with open(SELFTEST_LOG + ".pid", "w") as fh:
                 fh.write(str(proc.pid))
             return self.reply(200, "application/json", json.dumps({"started": True}).encode())
+        if path == "/api/mcp":
+            try:
+                body = self.body()
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            action = str(body.get("action") or "")
+            if action not in ("add", "remove", "on", "off"):
+                return self.reply(400, "text/plain", b"bad request")
+            args = ["mcp", action, str(body.get("name") or "")]
+            if body.get("command"):
+                args += ["--command", str(body["command"])]
+            if body.get("url"):
+                args += ["--url", str(body["url"])]
+            for key in body.get("env") or []:
+                args += ["--env", str(key)]
+            if body.get("project"):
+                known = [p["path"] for p in projects.list_projects(RUNS, alive, projects.opened(STATE))]
+                if not any(projects.same(p, str(body["project"])) for p in known):
+                    return self.reply(404, "text/plain", b"not a project the workshop knows")
+                args += ["--project", str(body["project"])]
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            proc = subprocess.run([sys.executable, entry, *args], capture_output=True, text=True, timeout=30)
+            if proc.returncode != 0:
+                return self.reply(409, "text/plain", (proc.stderr or proc.stdout).strip().encode())
+            return self.reply(200, "application/json", json.dumps({"detail": proc.stdout.strip().splitlines()[0]}).encode())
+        if path == "/api/projects/open":
+            try:
+                wanted = os.path.realpath(os.path.expanduser(str(self.body().get("path") or "")))
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            home = os.path.realpath(HOME)
+            if not wanted.startswith(home + os.sep) or not os.path.isdir(wanted):
+                return self.reply(400, "text/plain", b"choose a folder inside your home folder")
+            projects.open_project(STATE, wanted)
+            return self.reply(200, "application/json", json.dumps({"path": wanted}).encode())
+        if path == "/api/rules":
+            try:
+                body = self.body()
+            except ValueError:
+                return self.reply(400, "text/plain", b"bad request")
+            wanted = str(body.get("project") or "")
+            known = [p["path"] for p in projects.list_projects(RUNS, alive, projects.opened(STATE))]
+            if not any(projects.same(p, wanted) for p in known):
+                return self.reply(404, "text/plain", b"not a project the workshop knows")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            proc = subprocess.run([sys.executable, entry, "rules", wanted, "on" if body.get("on") else "off", "--json"],
+                                  capture_output=True, text=True, timeout=30)
+            return self.reply(200 if proc.returncode == 0 else 500, "application/json", proc.stdout.encode())
         if path == "/api/protected":
             try:
                 body = self.body()

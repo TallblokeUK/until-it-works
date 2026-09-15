@@ -75,6 +75,21 @@ class SingleMode(unittest.TestCase):
         plan_prompt = next(c[1] for c in ctx.planner.calls if c[0] == "plan")
         self.assertIn("- workers: builder\n- quick reviewer: quick\n- panel: lenses\n- final judge: judge", plan_prompt)
 
+    def test_every_role_is_given_the_project_rules(self):
+        repo = make_repo({"README": "x", "CLAUDE.md": "Always write British English.", ".cursorrules": "No semicolons."})
+        builder = Script(implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done", review=approve, panel=approve)
+        judge = Script(audit=approve)
+        lead = Script(plan=lambda *a: plan_reply(single()))
+        ctx = context(builder, judge, lead)
+        self.assertTrue(orchestrate(ctx, repo)["approved"], log(ctx))
+        prompts = {"plan": lead.calls[0][1], "implement": builder.calls[0][1],
+                   "review": next(c[1] for c in builder.calls if c[0] == "review"),
+                   "panel": next(c[1] for c in builder.calls if c[0].startswith("panel")), "audit": judge.calls[0][1]}
+        for role, prompt in prompts.items():
+            self.assertIn("Always write British English.", prompt, role)
+            self.assertIn("No semicolons.", prompt, role)
+        self.assertIn("project rules: CLAUDE.md, .cursorrules", log(ctx))
+
     def test_cline_checkpoint_refs_from_the_run_are_dropped(self):
         repo = make_repo({"README": "x"})
         sh(repo, "git", "update-ref", "refs/cline/checkpoints/mine/1", "HEAD")

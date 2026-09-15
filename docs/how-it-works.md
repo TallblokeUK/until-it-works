@@ -41,6 +41,43 @@ A safety net remains for runaway spend: `--budget` (180 working minutes; time
 waiting for you does not count) and `--max-calls` (800). Reaching it is
 reported NOT approved, with everything kept.
 
+## Project rules
+
+Each AI tool loads its own kind of instructions file by itself (Claude Code reads
+CLAUDE.md, Codex AGENTS.md, Cline .clinerules), so on its own a judge could
+enforce a rule the workers never saw. Before planning, every job collects the
+project's CLAUDE.md, AGENTS.md, GEMINI.md, QWEN.md, rules.md, CONVENTIONS.md,
+.cursorrules, .cursor/rules, .clinerules, .windsurfrules and
+.github/copilot-instructions.md. Identical copies are included once, links
+pointing outside the project are ignored, and the size is capped. The same
+"Project rules" section then goes to the planner, the workers, the reviewer,
+the panel, the judge and any ruling. A reviewer may block a change that breaks
+one, citing the file. The rules never override the loop's own rules: file
+ownership, frozen tests and the verdict format. Switch them off per project
+with RULES in the project bar, or `mp-agent rules PATH off`.
+
+## MCP servers
+
+Each job builds one list of MCP servers: the built-in Context7 and Playwright
+(unless switched off), then yours for every project, then this project's. Each
+tool gets that list its own way:
+
+- **Claude Code:** `--mcp-config` with `--strict-mcp-config`, so your other
+  connectors (mail, drive) never load.
+- **Codex:** a `-c mcp_servers.*` setting for each server, with the servers
+  from your own Codex config switched off for the job.
+- **OpenCode:** its per-call config.
+- **Gemini CLI:** its system settings.
+- **Qwen Code:** `--mcp-config`, plus `--allowed-mcp-server-names` for both
+  Gemini and Qwen.
+- **Cline:** it has no per-call list, so missing servers are added to its own
+  settings.
+- **Antigravity:** keeps its own.
+
+A server's key is referenced by name (`${CONTEXT7_API_KEY}`) and passed to the
+tool as an environment variable for that call only. A reference is only included
+when the key is actually set.
+
 ## Contracts and the decisions log
 
 Reviewers judge against the plan's contract, not their own taste. A blocking

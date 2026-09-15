@@ -104,6 +104,9 @@ finished. [How it works](docs/how-it-works.md) has the detail.
   spending more. Work paid for by a subscription is shown, but not counted.
 - **Your keys stay yours.** They're kept in your system keychain, shown only as
   their last four characters, and handed only to the tool call that needs them.
+- **The same tools and rules for every role.** Each job gives the planner,
+  workers, reviewers and judge the same MCP servers and the same project rules
+  (CLAUDE.md, AGENTS.md…), whichever AI tool each one runs on.
 - **The workshop is local only.** It listens on 127.0.0.1 and refuses requests
   from other websites.
 

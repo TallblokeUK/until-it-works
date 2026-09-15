@@ -58,8 +58,33 @@ project:
   OPEN FOLDER and NEW JOB HERE.
 
 The picker lists every project a job has run in that still exists, with
-"running", "needs you" or "2 to keep or discard" beside the name. The choice is
-remembered in this browser. Choose **all projects** to see everything again.
+"running", "needs you" or "2 to keep or discard" beside the name, plus any
+folder you opened. The choice is remembered in this browser. Choose
+**all projects** to see everything again.
+
+**Open a folder.** Choose **open a folder…** in the picker (or next to Project
+in NEW JOB) to browse your home folder and open any project, including one no
+job has run in yet. Git projects are marked.
+
+**REPO** in the project bar shows what the folder is connected to:
+
+- **Where it stands:** the branch, whether it's ahead of or behind the remote
+  (as of the last fetch), and any uncommitted changes.
+- **Every remote** (origin, upstream…), the GitHub repository it points at,
+  and whether that's **YOURS** (your account or one of your organisations) or
+  **SOMEONE ELSE'S**.
+- **From GitHub:** private or public, a fork of what, the default branch, and
+  your permission on it.
+- **A warning in plain words** when a push from this folder would change
+  someone else's repository, with a **PROTECT** button beside it.
+
+REPO only looks. It never fetches, pushes or changes anything.
+
+**RULES** in the project bar shows the project's own instructions for AI agents
+(CLAUDE.md, AGENTS.md, rules.md, Cursor and Cline rules). Every role in a job
+gets the same copy, whatever tool it runs on, and reviewers can hold the work
+to them. Untick the box to stop a project's rules files steering the agents,
+for example in a repository you didn't write.
 
 ## 3. From a terminal
 

@@ -114,7 +114,24 @@
   .presetline{padding:5px 0;border-top:1px solid #2d2757;font-size:18px} .presetline.off{color:var(--dim)}
   .presetline small{display:block;color:var(--dim);font-size:15px}
   .protectline{display:flex;gap:10px;align-items:center;padding:4px 0;border-top:1px solid #2d2757;font-size:18px}
+  #rulesPanel,#repoPanel,#folderPanel{max-height:calc(100vh - 90px);overflow:auto}
+  .folderpath{font-size:17px;color:var(--dim);margin:4px 0;overflow-wrap:anywhere}
+  .folderpath a,.folderrow{color:var(--cyan);cursor:pointer}
+  #folderList{max-height:48vh;overflow:auto;border:1px solid var(--edge);margin:6px 0}
+  .folderrow{display:flex;gap:10px;padding:3px 8px;border-top:1px solid #2d2757;font-size:18px;background:none;border-left:0;border-right:0;border-bottom:0;width:100%;text-align:left;font-family:var(--crt)}
+  .folderrow .gitmark{font-size:14px;color:#b9ffc9;border:1px solid #6dff8e;padding:0 4px}
+  .repowarn{border:2px solid var(--gold);color:#fff3c4;padding:6px 8px;margin:6px 0;font-size:18px}
+  .reporemote{border-top:1px solid #2d2757;padding:6px 0;font-size:18px}
+  .reporemote small{display:block;color:var(--dim);font-size:15px;overflow-wrap:anywhere}
+  .reporemote .tag{font-size:14px;border:1px solid var(--edge);padding:0 5px;margin-left:6px}
+  .reporemote .tag.mine{border-color:#6dff8e;color:#b9ffc9} .reporemote .tag.theirs{border-color:var(--gold);color:#fff3c4}
+  #rulesList details{border-top:1px solid #2d2757;padding:4px 0;font-size:18px}
+  #rulesList summary{cursor:pointer;color:var(--gold)}
+  #rulesList pre{white-space:pre-wrap;max-height:36vh;overflow:auto;background:#07061a;border:1px solid var(--edge);padding:8px;font-size:15px}
   .protectadd{display:flex;gap:8px;margin:6px 0}
+  .mcpadd{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
+  .mcpadd input,.mcpadd select{font:inherit;font-size:16px;background:#0d0b1e;color:#fff;border:2px solid var(--edge);padding:3px 6px}
+  .mcpadd #mcpWhat{flex:1;min-width:280px}
   .protectadd input{font:inherit;font-size:17px;background:#0d0b1e;color:#fff;border:2px solid var(--edge);padding:3px 6px;flex:1;max-width:420px}
   #setupPanel .testresult.ok{color:#b9ffc9} #setupPanel .testresult.bad{color:#ffb4b4}
   .selftestlog{max-height:28vh;overflow:auto;background:#07061a;border:1px solid var(--edge);padding:8px;font-size:15px;white-space:pre-wrap;margin:6px 0}
@@ -252,7 +269,7 @@
       <label><input type="radio" name="jobKind" value="oneoff"> a one-off</label>
     </div>
     <div class="setgrid">
-      <label id="jobLocalWrap">Project<select id="jobLocal"><option>loading…</option></select></label>
+      <label id="jobLocalWrap">Project <small><a href="#" id="jobBrowse">open a folder…</a></small><select id="jobLocal"><option>loading…</option></select></label>
       <label id="jobGithubWrap" hidden>Repo<select id="jobGithub"><option>loading…</option></select></label>
       <label id="jobNameWrap" hidden>Folder name <small>optional</small><input id="jobName" placeholder="my-new-thing"></label>
       <label>Planner<select id="job-planner"></select></label>
@@ -322,6 +339,20 @@
     <label class="setupbilling"><input type="checkbox" id="claudeBilling"> Pay for Claude Code with my Anthropic API key instead of a Claude subscription</label>
     <div class="setupsub">3 · Choose a team <span class="dim">you can change each role later in MODELS</span></div>
     <div id="setupPresets"></div>
+    <div class="setupsub">MCP servers <span class="dim">the tools every role is given, whatever AI tool it runs on</span></div>
+    <div id="setupMcp"></div>
+    <div class="mcpadd">
+      <input id="mcpName" autocomplete="off" spellcheck="false" placeholder="name, e.g. sentry">
+      <input id="mcpWhat" autocomplete="off" spellcheck="false" placeholder="command (npx -y @sentry/mcp-server) or URL (https://…)">
+      <input id="mcpEnv" autocomplete="off" spellcheck="false" placeholder="key names it needs, e.g. SENTRY_TOKEN (optional)">
+      <select id="mcpScope"><option value="">every project</option></select>
+      <button type="button" class="presetbtn" id="mcpAdd">ADD SERVER</button>
+    </div>
+    <div class="how">Claude Code, Codex, OpenCode, Gemini CLI and Qwen Code get exactly this list for each job (their own extra servers are left out).
+      Cline gets these added to its own MCP settings, so servers you added to Cline yourself stay. Antigravity uses its own settings.
+      A key a server needs goes in 2 · API keys (Context7 has its own line) or your environment; it is never written into these settings.</div>
+    <div class="setupsub">GitHub <span class="dim">the account the gh command is signed in with decides which repositories jobs can reach</span></div>
+    <div id="setupGithub" class="protectline dim">looking…</div>
     <div class="setupsub">4 · Protected repositories <span class="dim">never pushed to and never given a pull request; an owner (someone) or a repository (someone/their-repo)</span></div>
     <div id="setupProtected"></div>
     <div class="protectadd"><input id="protectInput" autocomplete="off" spellcheck="false" placeholder="someone or someone/their-repo">
@@ -332,6 +363,34 @@
     <div class="answer"><button type="button" class="quick" id="setupRescan">SCAN AGAIN</button>
       <button type="button" class="quick" data-close="setupPanel">CLOSE</button></div>
     <div class="how" id="setupStatus"></div>
+  </div>
+
+  <div class="settings" id="folderPanel" hidden>
+    <div class="label">OPEN A FOLDER <span class="dim">inside your home folder; git projects are marked</span></div>
+    <div class="folderpath" id="folderPath"></div>
+    <div id="folderList"></div>
+    <div class="answer"><button type="button" id="folderOpen">OPEN THIS FOLDER</button>
+      <button type="button" class="quick" data-close="folderPanel">CLOSE</button>
+      <label class="setupbilling"><input type="checkbox" id="folderHidden"> show hidden folders</label></div>
+    <div class="how" id="folderStatus"></div>
+  </div>
+
+  <div class="settings" id="repoPanel" hidden>
+    <div class="label">REPO <span class="dim" id="repoTitle"></span></div>
+    <div id="repoBody">looking…</div>
+    <div class="answer"><button type="button" class="quick" id="repoRefresh">LOOK AGAIN</button>
+      <button type="button" class="quick" data-close="repoPanel">CLOSE</button></div>
+    <div class="how" id="repoStatus">Nothing here fetches, pushes or changes anything.</div>
+  </div>
+
+  <div class="settings" id="rulesPanel" hidden>
+    <div class="label">PROJECT RULES <span class="dim" id="rulesProject"></span></div>
+    <div class="how">The project's own instructions for AI agents (CLAUDE.md, AGENTS.md, rules.md, Cursor and Cline rules…).
+      Every role in a job here gets the same copy, whatever tool it runs on, so a judge never enforces a rule the workers didn't see.</div>
+    <label class="setupbilling"><input type="checkbox" id="rulesOn"> Give these rules to every role in jobs on this project</label>
+    <div id="rulesList"></div>
+    <div class="answer"><button type="button" class="quick" data-close="rulesPanel">CLOSE</button></div>
+    <div class="how" id="rulesStatus"></div>
   </div>
 
   <div class="settings" id="tidyPanel" hidden>
@@ -1008,12 +1067,13 @@ function renderHud() {
   const pill = $("pill");
   const last = S.log.filter(Boolean).slice(-1)[0] || "";
   let kind = "", label = "IDLE";
-  if (!S.run) label = "NO RUNS YET";
+  if (!S.run) label = selectedProject ? "NO RUNS IN THIS PROJECT" : "NO RUNS YET";
   else if (S.live) { kind = "live"; label = "LIVE"; }
   else if (/^approved:/.test(last) || S.meta?.approved) { kind = "ok"; label = "LAST RUN APPROVED"; }
   else { kind = "bad"; label = "LAST RUN STOPPED"; }
   pill.className = "pill " + kind; $("pillText").textContent = (DEMO ? "DEMO · " : "") + label;
   if (S.task) $("task").textContent = S.task;
+  else if (!S.run) $("task").textContent = selectedProject ? "no jobs in this project yet: press NEW JOB HERE" : "no jobs yet: press NEW JOB";
   const limit = (S.log.join("\n").match(/limits\s+(\d+) passes/) || [])[1];
   $("pass").textContent = S.run ? `${S.passes || 0}${limit ? " / " + limit : ""}` : "–";
   $("time").textContent = S.run ? fmtTime(S.elapsed) : "–";
@@ -1282,7 +1342,7 @@ $("resumeBtn").addEventListener("click", async () => {
 });
 $("discardBtn").addEventListener("click", () => act("discard"));
 // ---- overlays over the scene: only one open at a time
-const OVERLAYS = ["jobForm", "settings", "changesPanel", "queuePanel", "historyPanel", "memoryPanel", "tidyPanel", "setupPanel"];
+const OVERLAYS = ["jobForm", "settings", "changesPanel", "queuePanel", "historyPanel", "memoryPanel", "tidyPanel", "setupPanel", "rulesPanel", "folderPanel", "repoPanel"];
 function openOverlay(id) { for (const o of OVERLAYS) $(o).hidden = o !== id; }
 for (const b of document.querySelectorAll("[data-close]")) b.addEventListener("click", () => { $(b.dataset.close).hidden = true; });
 const postJSON = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -1579,6 +1639,10 @@ function renderSetup() {
       el("div", {}, el("small", { text: `for ${k.for} · ${k.env}` }), el("small", {}, link), input, status), buttons));
   }
   $("claudeBilling").checked = info.claude_billing === "api";
+  renderMcp();
+  fetch("api/github", { cache: "no-store" }).then((r) => r.json()).then((g) => {
+    $("setupGithub").textContent = g.login ? `Signed in as ${g.login}` + (g.orgs.length ? ` · organisations: ${g.orgs.join(", ")}` : " · no organisations") : (g.problem || "not signed in");
+  }).catch(() => { $("setupGithub").textContent = "could not ask gh"; });
   // protected repositories
   const prot = $("setupProtected"); prot.innerHTML = "";
   if (!(info.protected || []).length) prot.append(el("div", { class: "protectline dim", text: "nothing protected" }));
@@ -1618,6 +1682,45 @@ async function testModel(spec, button, result) {
   button.disabled = false;
 }
 $("openSetup").addEventListener("click", () => { openOverlay("setupPanel"); loadSetup(); pollSelftest(); });
+async function renderMcp() {
+  let data;
+  try { data = await (await fetch("api/mcp" + (selectedProject ? "?project=" + encodeURIComponent(selectedProject) : ""), { cache: "no-store" })).json(); }
+  catch (e) { $("setupMcp").textContent = "could not list: the visualizer server is not running"; return; }
+  const box = $("setupMcp"); box.innerHTML = "";
+  for (const r of data.servers || []) {
+    const line = document.createElement("div"); line.className = "protectline";
+    const name = document.createElement("b"); name.textContent = r.name;
+    const scope = document.createElement("span"); scope.className = "dim";
+    scope.textContent = (r.scope === "built-in" ? "built-in: " + r.about : r.scope === "all projects" ? "every project" : "only " + r.scope.split("/").pop()) + " · " + r.what;
+    line.append(name, scope);
+    const act = (label, action) => {
+      const b = document.createElement("button"); b.type = "button"; b.className = "presetbtn"; b.textContent = label;
+      b.onclick = async () => {
+        const res = await postJSON("api/mcp", { action, name: r.name, project: r.scope.startsWith("/") ? r.scope : "" });
+        $("setupStatus").textContent = res.ok ? (await res.json()).detail : `not changed: ${await res.text()}`;
+        renderMcp();
+      };
+      return b;
+    };
+    if (r.scope === "built-in") line.append(act(r.on ? "SWITCH OFF" : "SWITCH ON", r.on ? "off" : "on"));
+    else line.append(act("REMOVE", "remove"));
+    if (!r.on) line.classList.add("dim");
+    box.append(line);
+  }
+  const scope = $("mcpScope");
+  scope.innerHTML = '<option value="">every project</option>';
+  if (selectedProject) { const o = document.createElement("option"); o.value = selectedProject; o.textContent = "only " + (currentProject() ? currentProject().name : selectedProject); scope.append(o); }
+}
+$("mcpAdd").addEventListener("click", async () => {
+  const what = $("mcpWhat").value.trim();
+  const body = { action: "add", name: $("mcpName").value.trim(), project: $("mcpScope").value,
+                 env: $("mcpEnv").value.split(/[\s,]+/).filter(Boolean) };
+  if (/^https?:\/\//.test(what)) body.url = what; else body.command = what;
+  const res = await postJSON("api/mcp", body);
+  $("setupStatus").textContent = res.ok ? (await res.json()).detail : (await res.text()).replace(/^not changed: /, "not added: ");
+  if (res.ok) { $("mcpName").value = ""; $("mcpWhat").value = ""; $("mcpEnv").value = ""; }
+  renderMcp();
+});
 async function changeProtected(action, value) {
   const res = await postJSON("api/protected", { action, value });
   $("setupStatus").textContent = res.ok ? (await res.json()).detail : `not changed: ${await res.text()}`;
@@ -1864,7 +1967,7 @@ async function refreshProjects() {
 function renderProjects() {
   const pick = $("projectPick");
   const label = (p) => p.name + (p.needs_you ? " · needs you" : p.live ? " · running" : "") + (p.to_decide ? ` · ${p.to_decide} to keep or discard` : "");
-  const wanted = [["", "all projects"], ...projectList.map((p) => [p.path, label(p)])];
+  const wanted = [["", "all projects"], ...projectList.map((p) => [p.path, label(p)]), ["__open__", "open a folder…"]];
   if (pick.options.length !== wanted.length || [...pick.options].some((o, i) => o.value !== wanted[i][0] || o.textContent !== wanted[i][1])) {
     pick.innerHTML = "";
     for (const [value, text] of wanted) { const o = document.createElement("option"); o.value = value; o.textContent = text; pick.appendChild(o); }
@@ -1880,9 +1983,35 @@ function renderProjects() {
   const count = document.createElement("span"); count.textContent = `${p.runs} run${p.runs === 1 ? "" : "s"}`;
   bar.append(name, path, count);
   if (p.to_decide) bar.append(button(`${p.to_decide} WAITING FOR KEEP OR DISCARD`, showFirstToDecide, true));
-  bar.append(button("NEW JOB HERE", () => $("openJob").click()), button("MEMORY", () => $("openMemory").click()),
+  bar.append(button("NEW JOB HERE", () => $("openJob").click()), button("REPO", () => openRepo(p)), button("RULES", () => openRules(p)),
+             button("MEMORY", () => $("openMemory").click()),
              button("OPEN FOLDER", () => postJSON("api/open-folder", { project: p.path })),
              button("ALL PROJECTS", () => chooseProject(null)));
+}
+async function openRules(p) {
+  openOverlay("rulesPanel");
+  $("rulesProject").textContent = p.name;
+  $("rulesList").textContent = "looking…";
+  let info;
+  try {
+    const res = await fetch("api/rules?project=" + encodeURIComponent(p.path), { cache: "no-store" });
+    if (!res.ok) { $("rulesList").textContent = await res.text(); return; }
+    info = await res.json();
+  } catch (e) { $("rulesList").textContent = "could not look: the visualizer server is not running"; return; }
+  $("rulesOn").checked = info.enabled;
+  $("rulesOn").onchange = async () => {
+    const res = await postJSON("api/rules", { project: p.path, on: $("rulesOn").checked });
+    $("rulesStatus").textContent = res.ok ? ($("rulesOn").checked ? "On: the next jobs here follow these rules." : "Off: the next jobs here ignore these files.") : "not changed";
+  };
+  $("rulesList").innerHTML = "";
+  if (!info.files.length) $("rulesList").textContent = "This project has no rules files. Add a CLAUDE.md or AGENTS.md to its folder and jobs will follow it.";
+  for (const f of info.files) {
+    const d = document.createElement("details");
+    const summary = document.createElement("summary"); summary.textContent = `${f.path} (${f.text.length} characters)`;
+    const pre = document.createElement("pre"); pre.textContent = f.text;
+    d.append(summary, pre); $("rulesList").appendChild(d);
+  }
+  $("rulesStatus").textContent = "";
 }
 async function showFirstToDecide() {
   try {
@@ -1891,7 +2020,113 @@ async function showFirstToDecide() {
     if (first) { selectedRun = first.run; refreshTabs(); }
   } catch (e) { /* the state poll reports a dead server */ }
 }
-$("projectPick").addEventListener("change", () => chooseProject($("projectPick").value));
+$("projectPick").addEventListener("change", () => {
+  if ($("projectPick").value === "__open__") { $("projectPick").value = selectedProject || ""; openFolderBrowser("project"); return; }
+  chooseProject($("projectPick").value);
+});
+// ---- OPEN A FOLDER
+let folderMode = "project", folderCurrent = null;
+async function browseTo(path) {
+  let info;
+  try {
+    info = await (await fetch("api/browse?path=" + encodeURIComponent(path || "") + ($("folderHidden").checked ? "&hidden=1" : ""), { cache: "no-store" })).json();
+  } catch (e) { $("folderStatus").textContent = "could not look: the visualizer server is not running"; return; }
+  folderCurrent = info;
+  // the path as links back up to the home folder
+  const crumbs = $("folderPath"); crumbs.innerHTML = "";
+  const rel = info.path.slice(info.home.length).split("/").filter(Boolean);
+  const home = document.createElement("a"); home.textContent = "~"; home.onclick = () => browseTo(info.home); crumbs.append(home);
+  rel.forEach((part, i) => {
+    const a = document.createElement("a"); a.textContent = part;
+    a.onclick = () => browseTo(info.home + "/" + rel.slice(0, i + 1).join("/"));
+    crumbs.append(" / ", a);
+  });
+  const list = $("folderList"); list.innerHTML = "";
+  if (info.parent) {
+    const up = document.createElement("button"); up.type = "button"; up.className = "folderrow"; up.textContent = "↑ up a level";
+    up.onclick = () => browseTo(info.parent); list.append(up);
+  }
+  for (const f of info.folders) {
+    const row = document.createElement("button"); row.type = "button"; row.className = "folderrow";
+    row.append(document.createTextNode(f.name));
+    if (f.git) { const g = document.createElement("span"); g.className = "gitmark"; g.textContent = "GIT"; row.append(g); }
+    row.onclick = () => browseTo(f.path);
+    list.append(row);
+  }
+  if (!info.folders.length) list.append(Object.assign(document.createElement("div"), { className: "folderrow", textContent: "(no folders inside)" }));
+  $("folderOpen").textContent = folderMode === "job" ? "USE THIS FOLDER" : "OPEN THIS FOLDER";
+  $("folderStatus").textContent = info.git ? "This folder is a git project." :
+    "This folder isn't a git project. You can still open it; a job here sets up git first (NEW JOB asks before doing that).";
+}
+function openFolderBrowser(mode) {
+  folderMode = mode;
+  openOverlay("folderPanel");
+  browseTo(selectedProject || "");
+}
+$("folderHidden").addEventListener("change", () => browseTo(folderCurrent ? folderCurrent.path : ""));
+$("folderOpen").addEventListener("click", async () => {
+  if (!folderCurrent) return;
+  const res = await postJSON("api/projects/open", { path: folderCurrent.path });
+  if (!res.ok) { $("folderStatus").textContent = await res.text(); return; }
+  const path = (await res.json()).path;
+  await refreshProjects();
+  if (folderMode === "job") {
+    $("folderPanel").hidden = true;
+    selectedProject = path; chooseProject(path);
+    $("openJob").click();
+  } else {
+    $("folderPanel").hidden = true;
+    chooseProject(path);
+  }
+});
+$("jobBrowse").addEventListener("click", (e) => { e.preventDefault(); openFolderBrowser("job"); });
+// ---- REPO: what this folder is connected to
+async function openRepo(p) {
+  openOverlay("repoPanel");
+  $("repoTitle").textContent = p.name;
+  $("repoBody").textContent = "asking git and GitHub…";
+  $("repoRefresh").onclick = () => openRepo(p);
+  let r;
+  try {
+    const res = await fetch("api/repo?project=" + encodeURIComponent(p.path), { cache: "no-store" });
+    if (!res.ok) { $("repoBody").textContent = await res.text(); return; }
+    r = await res.json();
+  } catch (e) { $("repoBody").textContent = "could not look: the visualizer server is not running"; return; }
+  const body = $("repoBody"); body.innerHTML = "";
+  const add = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; body.append(n); return n; };
+  for (const w of r.warnings) add("div", "repowarn", "⚠ " + w);
+  if (r.is_git) {
+    const t = r.tracking;
+    add("div", "reporemote", `Branch ${r.branch || "?"}` + (t ? ` · tracking ${t.branch}: ${t.ahead} ahead, ${t.behind} behind (as of the last fetch)` : " · not tracking a remote branch") +
+      ` · ${r.uncommitted ? r.uncommitted + " uncommitted change(s)" : "no uncommitted changes"}`);
+  }
+  if (r.account) add("div", "reporemote", r.account.login ? `GitHub: signed in as ${r.account.login}` + (r.account.orgs.length ? `; your organisations: ${r.account.orgs.join(", ")}` : "") : (r.account.problem || "GitHub: not signed in"));
+  for (const m of r.remotes) {
+    const row = add("div", "reporemote");
+    const title = document.createElement("b"); title.textContent = m.name; row.append(title, " → ", document.createTextNode(m.github || m.url));
+    if (m.github) {
+      const tag = document.createElement("span");
+      tag.className = "tag " + (m.yours ? "mine" : m.yours === false ? "theirs" : "");
+      tag.textContent = m.yours ? "YOURS" : m.yours === false ? "SOMEONE ELSE'S" : "?";
+      row.append(tag);
+      if (m.protected) { const pr = document.createElement("span"); pr.className = "tag mine"; pr.textContent = "PROTECTED"; row.append(pr); }
+    }
+    const i = m.info || {};
+    const facts = [m.url];
+    if (m.github) facts.push(i.problem || [i.private ? "private" : "public", i.permission ? `your permission: ${i.permission}` : "", i.default_branch ? `default branch ${i.default_branch}` : "", i.pushed_at ? `last pushed ${i.pushed_at.slice(0, 10)}` : ""].filter(Boolean).join(" · "));
+    for (const f of facts) row.append(Object.assign(document.createElement("small"), { textContent: f }));
+    if (m.note) row.append(Object.assign(document.createElement("small"), { textContent: m.note }));
+    if (m.github && m.yours === false && !m.protected) {
+      const b = document.createElement("button"); b.type = "button"; b.className = "presetbtn"; b.textContent = `PROTECT ${m.github}`;
+      b.onclick = async () => {
+        const res = await postJSON("api/protected", { action: "add", value: m.github });
+        $("repoStatus").textContent = res.ok ? `${m.github} is protected: nothing is ever pushed to it from here.` : await res.text();
+        openRepo(p);
+      };
+      row.append(b);
+    }
+  }
+}
 setInterval(refreshProjects, 5000);
 refreshProjects();
 async function refreshTabs() {

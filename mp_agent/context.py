@@ -53,6 +53,7 @@ class Context:
                  reviewer=None, panel=None):
         self.run, self.worker, self.judge, self.planner = run, worker, judge, planner_agent
         self.reviewer, self.panel = reviewer or worker, panel or worker
+        self.project_rules = ""        # the project's own instructions (rules.py), for every role
         self.decisions, self.options, self.notifier = decisions, options, notifier
         self.stop = threading.Event()
         self.stop_reason = None

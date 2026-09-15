@@ -91,6 +91,40 @@ explains the roles and presets.
 
 When the box at the top says **Ready**, press **NEW JOB**.
 
+## MCP servers
+
+MCP servers give the agents extra tools. Two are built in: **context7**, for
+current documentation for libraries and frameworks, and **playwright**, a
+headless browser so agents can check web pages. The screenshots it takes are
+kept with the run. Switch either off with **SWITCH OFF**.
+
+To add your own, give it a name and either the command that starts it
+(`npx -y @sentry/mcp-server`) or its address (`https://…`). Then choose
+**every project**, or only the project chosen in the picker. If it needs a key,
+put the key's name in the third box (for example `SENTRY_TOKEN`) and the key
+itself in your environment. The server's settings only ever hold the name.
+Context7's optional key has its own line under API keys.
+
+Every role in a job gets the same servers, whatever AI tool it runs on:
+
+| Tool | Gets |
+|---|---|
+| Claude Code, Codex, OpenCode, Gemini CLI, Qwen Code | exactly this list; their own extra servers are left out for the job |
+| Cline | this list added to its own MCP settings (servers you added to Cline yourself stay) |
+| Antigravity | its own settings only |
+
+From a terminal: `mp-agent mcp list`,
+`mp-agent mcp add sentry --command "npx -y @sentry/mcp-server" --env SENTRY_TOKEN`,
+`mp-agent mcp add db --url https://… --project ~/code/shop`,
+`mp-agent mcp remove sentry`, `mp-agent mcp off playwright`.
+
+## GitHub
+
+SETUP shows which GitHub account the `gh` command is signed in with, and your
+organisations. That decides which repositories NEW JOB can clone or pull, and
+what counts as "yours" in a project's REPO view. To sign in or switch account:
+`gh auth login`.
+
 ## 5. Protected repositories
 
 Some repositories must never be changed from here: a client's, or someone

@@ -12,7 +12,7 @@ from . import gitops
 from .providers import acting, tagged, verdict
 
 RULES = """Judge the change against the contract below, not against your own idea of what it should be.
-- A blocking defect must either break a contract line (cite it, e.g. C2 or A1) or be wrong behaviour for an input that is in scope, and you must name that input.
+- A blocking defect must either break a contract line (cite it, e.g. C2 or A1), break one of the project's own rules if any are given (cite the file), or be wrong behaviour for an input that is in scope, and you must name that input.
 - Anything listed out of scope, and anything the contract does not ask for, is never a reason to block. Mention it as a remark if you must.
 - The decisions log records what earlier rounds settled. Do not reopen a decision unless you can show it breaks the contract.
 - If the implementer declined a finding by citing the contract or a decision, accept that unless the citation is wrong.
@@ -77,8 +77,10 @@ class GateResult:
     trouble: tuple = None                        # (agent name, Reply) when the judge itself could not run
 
 
-def review_prompt(goal, contract, decisions, unit, diff, validation, declines):
+def review_prompt(goal, contract, decisions, unit, diff, validation, declines, project_rules=""):
     parts = [f"# The requirement\n\n{goal}", contract.render(), decisions.render(unit)]
+    if project_rules:
+        parts.append(project_rules.replace("# Project rules", "## Project rules", 1))
     if declines:
         parts.append("## Findings the implementer declined last pass\n\n" + "\n".join(f"- {d}" for d in declines))
     if len(diff) > MAX_DIFF_CHARS:
@@ -120,7 +122,8 @@ def _guarded(tree, say, fn):
 
 def review(ctx, worker, diff, validation):
     spec, run = worker.spec, ctx.run
-    prompt = review_prompt(spec.goal, spec.contract, ctx.decisions, spec.name, diff, validation, worker.declines)
+    prompt = review_prompt(spec.goal, spec.contract, ctx.decisions, spec.name, diff, validation, worker.declines,
+                           getattr(ctx, "project_rules", ""))
     def reviewing():
         with acting("reviewer", spec.name):
             return _ask(ctx.reviewer, REVIEWER_SYSTEM, prompt, worker.tree, worker.say, "reviewer",
@@ -142,7 +145,8 @@ def review(ctx, worker, diff, validation):
 def panel(ctx, worker, diff, validation, size):
     spec, run = worker.spec, ctx.run
     names = list(LENSES)[:max(0, min(size, len(LENSES)))]
-    prompt = review_prompt(spec.goal, spec.contract, ctx.decisions, spec.name, diff, validation, worker.declines)
+    prompt = review_prompt(spec.goal, spec.contract, ctx.decisions, spec.name, diff, validation, worker.declines,
+                           getattr(ctx, "project_rules", ""))
     run.write_text(worker.pass_file("panel-prompt.md"), prompt)
 
     def member(name):
@@ -183,7 +187,8 @@ def panel(ctx, worker, diff, validation, size):
 
 def audit(ctx, worker, diff, validation):
     spec, run = worker.spec, ctx.run
-    prompt = review_prompt(spec.goal, spec.contract, ctx.decisions, spec.name, diff, validation, worker.declines)
+    prompt = review_prompt(spec.goal, spec.contract, ctx.decisions, spec.name, diff, validation, worker.declines,
+                           getattr(ctx, "project_rules", ""))
     run.write_text(worker.pass_file("audit-prompt.md"), prompt)
     def auditing():
         with acting("judge", spec.name):

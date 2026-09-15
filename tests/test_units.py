@@ -448,10 +448,10 @@ class ToolActivity(unittest.TestCase):
     def test_claude_loads_only_our_mcp_servers(self):
         from unittest import mock
         from mp_agent import providers
-        path = os.path.join(tempfile.mkdtemp(), "mcp.json")
-        with open(path, "w") as fh:
-            fh.write("{}")
-        agent = providers.make_agent("claude:opus", mcp_config=path)
+        from mp_agent import mcp
+        tools = mcp.Tools({"docs": {"command": "npx", "args": ["-y", "docs"]}}, tempfile.mkdtemp())
+        path = tools.claude_file
+        agent = providers.make_agent("claude:opus", mcp=tools)
         result = '{"type":"result","result":"VERDICT: APPROVED","total_cost_usd":0.1,"modelUsage":{}}'
         with mock.patch.object(providers, "run_cli", return_value=providers.Reply(result, 0, 1.0)) as run:
             reply = agent.ask("s", "p", "/tmp")
@@ -837,6 +837,8 @@ class WorkshopServer(unittest.TestCase):
             self.assertEqual(json.loads(call("/api/runs?project=/nowhere")[1]), [])
             # a folder no run has worked in is never opened, whatever the page asks
             self.assertEqual(call("/api/open-folder", {"project": home}, good)[0], 404)
+            self.assertEqual(call("/api/projects/open", {"path": "/etc"}, good)[0], 400)      # only inside home
+            self.assertEqual(call("/api/repo?project=/etc")[0], 404)                          # only known projects
         finally:
             server.terminate()
             server.wait(timeout=10)
@@ -1043,3 +1045,161 @@ class Projects(unittest.TestCase):
         names = sorted(p["name"] for p in projects.list_projects(runs, alive=lambda d: False))
         self.assertEqual(len(set(names)), 2)
         self.assertTrue(all(n.endswith("/site") for n in names))
+
+
+class ProjectRules(unittest.TestCase):
+    def test_finds_every_kind_of_instruction_file_once_and_respects_the_switch(self):
+        from mp_agent import rules
+        repo = tempfile.mkdtemp(prefix="mp-rules-")
+        write(repo, "CLAUDE.md", "Use tabs.")
+        write(repo, "AGENTS.md", "Use tabs.")                              # an identical copy is given once
+        write(repo, ".cursor/rules/php.mdc", "PHP must pass phpcs.")
+        write(repo, ".clinerules/style.md", "No jQuery.")
+        write(repo, ".github/copilot-instructions.md", "British English.")
+        write(repo, "rules.md", "x" * (rules.PER_FILE + 500))
+        outside = tempfile.mkdtemp(prefix="mp-outside-")
+        write(outside, "secret.md", "not the project's")
+        os.symlink(os.path.join(outside, "secret.md"), os.path.join(repo, "CONVENTIONS.md"))
+        found = dict(rules.find(repo))
+        self.assertEqual(sorted(found), sorted(["CLAUDE.md", ".cursor/rules/php.mdc", ".clinerules/style.md",
+                                                ".github/copilot-instructions.md", "rules.md"]))
+        self.assertIn("left out", found["rules.md"])
+        text = rules.render(rules.find(repo))
+        self.assertTrue(text.startswith("# Project rules"))
+        self.assertIn("never override the rules of this loop", text)
+        state = tempfile.mkdtemp(prefix="mp-rules-state-")
+        self.assertTrue(rules.collect(state, repo)[1])
+        rules.set_enabled(state, repo, False)
+        self.assertEqual(rules.collect(state, repo), ([], ""))
+        rules.set_enabled(state, repo, True)
+        self.assertEqual(len(rules.collect(state, repo)[0]), 5)
+        self.assertEqual(rules.render([]), "")
+
+
+class RepoInfo(unittest.TestCase):
+    def fake_gh(self, permissions):
+        def run(cmd, cwd=None, timeout=15):
+            if cmd[:3] == ["gh", "auth", "status"]:
+                return 0, json.dumps({"hosts": {"github.com": [{"login": "me", "active": True}]}}), ""
+            if cmd[:3] == ["gh", "api", "user/orgs"]:
+                return 0, "my-org\n", ""
+            if cmd[:3] == ["gh", "repo", "view"]:
+                owner = cmd[3].split("/")[0]
+                return 0, json.dumps({"isPrivate": True, "isFork": False, "viewerPermission": permissions.get(cmd[3], "READ"),
+                                      "defaultBranchRef": {"name": "main"}, "owner": {"login": owner}}), ""
+            proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+            return proc.returncode, proc.stdout, proc.stderr
+        return run
+
+    def test_remotes_are_explained_and_a_push_to_someone_elses_repo_is_warned_about(self):
+        from mp_agent import repoinfo
+        repoinfo._CACHE.clear()
+        repo = make_repo({"a.txt": "a"})
+        sh(repo, "git", "remote", "add", "origin", "https://someone:ghp_secret123@github.com/client/site.git")
+        sh(repo, "git", "remote", "add", "mine", "git@github.com:me/site.git")
+        sh(repo, "git", "remote", "add", "work", "git@github.com:my-org/site.git")
+        state = tempfile.mkdtemp(prefix="mp-repo-state-")
+        info = repoinfo.inspect(repo, state, run=self.fake_gh({"client/site": "WRITE", "me/site": "ADMIN"}))
+        remotes = {r["name"]: r for r in info["remotes"]}
+        self.assertEqual((remotes["mine"]["yours"], remotes["work"]["yours"], remotes["origin"]["yours"]), (True, True, False))
+        self.assertIn("belongs to client", remotes["origin"]["warning"])
+        self.assertIn("you can push to it (write)", info["warnings"][0])
+        self.assertNotIn("ghp_secret123", json.dumps(info))                       # credentials never reach the page
+        write(state, "config.json", json.dumps({"protected": ["client"]}))
+        repoinfo._CACHE.clear()
+        info = repoinfo.inspect(repo, state, run=self.fake_gh({"client/site": "WRITE"}))
+        origin = next(r for r in info["remotes"] if r["name"] == "origin")
+        self.assertTrue(origin["protected"])
+        self.assertNotIn("warning", origin)
+        self.assertIn("a git push you run yourself", origin["note"])
+        write(repo, "b.txt", "uncommitted")
+        repoinfo._CACHE.clear()
+        self.assertTrue(any("uncommitted" in w for w in repoinfo.inspect(repo, state, run=self.fake_gh({}))["warnings"]))
+        plain = tempfile.mkdtemp(prefix="mp-not-git-")
+        self.assertIn("not a git repository", repoinfo.inspect(plain, state, run=self.fake_gh({}))["warnings"][0])
+
+    def test_folder_browser_stays_inside_home_and_marks_git_projects(self):
+        from mp_agent import repoinfo
+        home = tempfile.mkdtemp(prefix="mp-browse-home-")
+        os.makedirs(os.path.join(home, "code", "shop", ".git"))
+        os.makedirs(os.path.join(home, ".hidden"))
+        top = repoinfo.browse(home, home)
+        self.assertEqual([f["name"] for f in top["folders"]], ["code"])
+        self.assertIsNone(top["parent"])
+        inner = repoinfo.browse(os.path.join(home, "code"), home)
+        self.assertEqual(inner["folders"][0], {"name": "shop", "path": os.path.join(os.path.realpath(home), "code", "shop"), "git": True})
+        self.assertEqual(repoinfo.browse("/etc", home)["path"], os.path.realpath(home))     # outside home: back to home
+        self.assertIn(".hidden", [f["name"] for f in repoinfo.browse(home, home, show_hidden=True)["folders"]])
+
+    def test_opened_folders_join_the_project_list(self):
+        from mp_agent import projects
+        state, runs, folder = tempfile.mkdtemp(), tempfile.mkdtemp(), tempfile.mkdtemp(prefix="opened-")
+        projects.open_project(state, folder)
+        listed = projects.list_projects(runs, alive=lambda d: False, extra=projects.opened(state))
+        self.assertEqual([(p["path"], p["runs"]) for p in listed], [(os.path.realpath(folder), 0)])
+
+
+class McpServers(unittest.TestCase):
+    def test_one_list_with_scopes_and_every_tool_gets_it_its_own_way(self):
+        from unittest import mock
+        from mp_agent import mcp, providers
+        state, shots = tempfile.mkdtemp(prefix="mp-mcp-"), "/shots"
+        shop = tempfile.mkdtemp(prefix="shop-")
+        mcp.add(state, "sentry", mcp.parse_spec('npx -y "@sentry/mcp-server" --org acme', env_keys=["SENTRY_TOKEN"]))
+        mcp.add(state, "db", mcp.parse_spec(url="https://mcp.example/db"), project=shop)
+        mcp.switch_builtin(state, "playwright", False)
+        self.assertEqual(sorted(mcp.servers_for(state, shots)), ["context7", "sentry"])
+        self.assertEqual(sorted(mcp.servers_for(state, shots, shop)), ["context7", "db", "sentry"])
+        self.assertEqual(mcp.servers_for(state, shots)["sentry"]["args"], ["-y", "@sentry/mcp-server", "--org", "acme"])
+        with self.assertRaises(ValueError):
+            mcp.add(state, "Bad Name!", {"command": "x"})
+        with self.assertRaises(ValueError):
+            mcp.parse_spec(url="ftp://nope")
+        servers = mcp.servers_for(state, shots, shop)
+        with mock.patch.dict(os.environ, {"SENTRY_TOKEN": "tok-real-secret"}, clear=False):
+            os.environ.pop("CONTEXT7_API_KEY", None)
+            tools = mcp.Tools(servers, tempfile.mkdtemp(), codex_own=["node_repl"])
+        with open(tools.claude_file) as fh:
+            claude = json.load(fh)["mcpServers"]
+        self.assertEqual(claude["sentry"]["env"], {"SENTRY_TOKEN": "${SENTRY_TOKEN}"})    # a reference, never the key
+        self.assertEqual(claude["context7"]["env"], {})                                  # no key set: nothing referenced
+        self.assertEqual(claude["db"], {"type": "http", "url": "https://mcp.example/db"})
+        for path in (tools.claude_file, tools.gemini_file):
+            with open(path) as fh:
+                self.assertNotIn("tok-real-secret", fh.read())
+        self.assertIn("mcp_servers.node_repl.enabled=false", tools.codex)
+        self.assertIn('mcp_servers.sentry.env_vars=["SENTRY_TOKEN"]', tools.codex)
+        self.assertEqual(tools.opencode["sentry"]["environment"], {"SENTRY_TOKEN": "{env:SENTRY_TOKEN}"})
+
+        calls = []
+        with mock.patch.object(providers, "run_cli", side_effect=lambda cmd, cwd, t, **kw: calls.append((cmd, kw)) or
+                               providers.Reply("fine", 0, 0.1)):
+            providers.make_agent("qwen:m", mcp=tools).ask("S", "THE PROMPT", "/tmp")
+            providers.make_agent("gemini:default", mcp=tools).ask("S", "THE PROMPT", "/tmp")
+            providers.make_agent("opencode:openrouter/x").ask("S", "P", "/tmp")
+            providers.make_agent("opencode:openrouter/x", mcp=tools).ask("S", "P", "/tmp")
+            providers.make_agent("codex:gpt", mcp=tools).ask("S", "P", "/tmp")
+        qwen, gemini, opencode_plain, opencode, codex = calls
+        self.assertTrue(qwen[0][-1].endswith("THE PROMPT"))                                # not swallowed by the list flag
+        self.assertNotIn("--safe-mode", qwen[0])
+        self.assertEqual(gemini[1]["env"]["GEMINI_CLI_SYSTEM_SETTINGS_PATH"], tools.gemini_file)
+        self.assertNotIn("mcp", json.loads(opencode_plain[1]["env"]["OPENCODE_CONFIG_CONTENT"]))
+        config = json.loads(opencode[1]["env"]["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual((sorted(config["mcp"]), config["permission"]), (["context7", "db", "sentry"], {"edit": "deny"}))
+        self.assertEqual(codex[0][:3], ["codex", "exec", "-c"])
+        self.assertTrue(mcp.remove(state, "db", project=shop))
+        self.assertNotIn("db", mcp.servers_for(state, shots, shop))
+
+    def test_cline_gets_missing_servers_added_and_keeps_its_own(self):
+        from unittest import mock
+        from mp_agent import mcp
+        home = tempfile.mkdtemp(prefix="mp-cline-home-")
+        write(os.path.join(home, ".cline", "data", "settings"), "cline_mcp_settings.json",
+              json.dumps({"mcpServers": {"context7": {}, "mine": {}}}))
+        ran = []
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            added = mcp.sync_cline({"context7": {"command": "npx"}, "sentry": {"command": "npx", "args": ["-y", "s"]},
+                                    "remote": {"url": "https://x"}},
+                                   run=lambda cmd, **kw: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+        self.assertEqual(added, ["sentry"])
+        self.assertEqual(ran, [["cline", "mcp", "install", "sentry", "--yes", "--", "npx", "-y", "s"]])

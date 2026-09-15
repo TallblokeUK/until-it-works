@@ -31,9 +31,38 @@ def same(a, b):
     return bool(a) and bool(b) and os.path.realpath(a) == os.path.realpath(b)
 
 
-def list_projects(runs_dir, alive):
-    """Every project with at least one run, most recently active first."""
+def opened(state_dir):
+    """Folders opened with OPEN A FOLDER, so they are in the picker before any job has run there."""
+    try:
+        with open(os.path.join(state_dir, "config.json")) as fh:
+            return [p for p in (json.load(fh).get("opened_projects") or []) if isinstance(p, str)]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def open_project(state_dir, path):
+    path = os.path.realpath(path)
+    try:
+        with open(os.path.join(state_dir, "config.json")) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    data["opened_projects"] = [path] + [p for p in (data.get("opened_projects") or []) if os.path.realpath(p) != path][:29]
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, "config.json.tmp"), "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(os.path.join(state_dir, "config.json.tmp"), os.path.join(state_dir, "config.json"))
+    return path
+
+
+def list_projects(runs_dir, alive, extra=()):
+    """Every project with at least one run, or opened in the workshop, most recently active first."""
     found = {}
+    for path in extra:
+        real = os.path.realpath(path)
+        if os.path.isdir(real):
+            found[real] = {"path": real, "name": os.path.basename(real) or real, "runs": 0, "last": os.path.getmtime(real),
+                           "live": False, "needs_you": False, "to_decide": 0, "exists": True}
     try:
         names = os.listdir(runs_dir)
     except OSError:

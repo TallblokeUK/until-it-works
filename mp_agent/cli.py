@@ -16,6 +16,8 @@
     mp-agent launchers [--install]       /mp-agent in Claude Code, Codex, Gemini CLI, OpenCode, Qwen Code and Cline
     mp-agent app [--install]             an app icon that opens the workshop without a terminal
     mp-agent protect [add|remove OWNER[/REPO]]   repositories that are never pushed to
+    mp-agent rules [PATH] [on|off]       the project's CLAUDE.md, AGENTS.md and the like, given to every role
+    mp-agent mcp [list|add|remove|on|off]   the MCP servers every role is given
     mp-agent models [--json]             the models available for each role, the presets, the current choices
     mp-agent where [--json] [--refresh]  where a job can run: recent local projects, GitHub repos, new, one-off
     mp-agent pr [--run DIR] [--base BRANCH]   push a finished run's branch and open a GitHub pull request
@@ -628,6 +630,69 @@ def selftest(argv):
     return 0 if ok else 1
 
 
+def mcp_command(argv):
+    """mp-agent mcp list | add NAME (--command "..." | --url URL) [--env KEY] [--project PATH]
+    | remove NAME [--project PATH] | on NAME | off NAME"""
+    from . import mcp
+    p = argparse.ArgumentParser(prog="mp-agent mcp", allow_abbrev=False)
+    p.add_argument("action", nargs="?", default="list", choices=("list", "add", "remove", "on", "off"))
+    p.add_argument("name", nargs="?")
+    p.add_argument("--command", dest="server_command", help='how to start a local server, e.g. "npx -y @sentry/mcp-server"')
+    p.add_argument("--url", help="the address of a remote server")
+    p.add_argument("--env", action="append", default=[], help="an environment variable the server needs, e.g. SENTRY_TOKEN")
+    p.add_argument("--project", help="only for this project (default: every project)")
+    p.add_argument("--json", action="store_true")
+    args = p.parse_args(argv)
+    project = os.path.realpath(os.path.expanduser(args.project)) if args.project else None
+    try:
+        if args.action == "add":
+            if not args.name:
+                raise ValueError("give the server a name")
+            mcp.add(STATE, args.name, mcp.parse_spec(args.server_command, args.url, args.env), project)
+            print(f"added {args.name}" + (f" for {project}" if project else " for every project"))
+        elif args.action == "remove":
+            print("removed" if mcp.remove(STATE, args.name or "", project) else "there was no such server")
+        elif args.action in ("on", "off"):
+            mcp.switch_builtin(STATE, args.name or "", args.action == "on")
+            print(f"{args.name} {args.action}")
+    except ValueError as exc:
+        print(f"not changed: {exc}", file=sys.stderr)
+        return 1
+    rows = mcp.listing(STATE, SHOTS, project)
+    if args.json:
+        print(json.dumps({"servers": rows}))
+        return 0
+    if args.action == "list":
+        for r in rows:
+            print(f"  {'on ' if r['on'] else 'off'}  {r['name']:12} {r['scope']:14} {r['what']}")
+        print("\nadd one: mp-agent mcp add sentry --command \"npx -y @sentry/mcp-server\" --env SENTRY_TOKEN")
+    return 0
+
+
+def rules_command(argv):
+    """mp-agent rules [PATH] [on|off] [--json]: the project's own instructions every role is given."""
+    from . import rules
+    words = [a for a in argv if a != "--json"]
+    path = os.path.abspath(os.path.expanduser(words[0])) if words and words[0] not in ("on", "off") else os.getcwd()
+    project = gitops.toplevel(path) or path
+    switch = next((w for w in words if w in ("on", "off")), None)
+    if switch:
+        rules.set_enabled(STATE, project, switch == "on")
+    found = rules.find(project)
+    on = rules.enabled(STATE, project)
+    if "--json" in argv:
+        print(json.dumps({"project": project, "enabled": on,
+                          "files": [{"path": rel, "text": text} for rel, text in found]}))
+        return 0
+    print(f"{project}: project rules are {'ON' if on else 'OFF'}")
+    for rel, text in found:
+        print(f"  {rel}  ({len(text)} characters)")
+    if not found:
+        print("  no rules files (CLAUDE.md, AGENTS.md, rules.md, .cursorrules, .clinerules and the like)")
+    print(f"\nswitch with: mp-agent rules {project} {'off' if on else 'on'}")
+    return 0
+
+
 def protect_command(argv):
     """mp-agent protect [list | add OWNER[/REPO] | remove OWNER[/REPO]]: GitHub accounts or
     repositories that are never pushed to and never get a pull request."""
@@ -965,6 +1030,10 @@ def main(argv):
         return set_config(argv[1:])
     if argv and argv[0] == "setup":
         return setup_command(argv[1:])
+    if argv and argv[0] == "mcp":
+        return mcp_command(argv[1:])
+    if argv and argv[0] == "rules":
+        return rules_command(argv[1:])
     if argv and argv[0] == "protect":
         return protect_command(argv[1:])
     if argv and argv[0] == "app":
@@ -1006,7 +1075,19 @@ def main(argv):
     tree_prefix = (os.path.join(TREES, os.path.basename(run.dir)) if not args.resume_run
                    else os.path.join(TREES, os.path.basename(args.resume_run.rstrip("/"))))
     usage = providers.Usage(lambda totals: run.write_json("usage.json", totals), tree_prefix, run.started - 60)
-    mcp_config = ensure_mcp_config()
+    from . import mcp as mcp_servers
+    os.makedirs(SHOTS, exist_ok=True)
+    job_servers = mcp_servers.servers_for(STATE, SHOTS, repo)
+    used_tools = {spec.split(":")[0] for spec in models.effective(choices).values() if spec}
+    from . import keys as stored_keys
+    job_tools = mcp_servers.Tools(job_servers, run.dir,
+                                  mcp_servers.codex_own_servers() if "codex" in used_tools else (),
+                                  available_env=stored_keys.environment(STATE).keys())
+    if "cline" in used_tools:
+        added = mcp_servers.sync_cline(job_servers)
+        if added:
+            run.say(f"   added to Cline's MCP settings: {', '.join(added)}")
+    run.say(f"   MCP servers: {', '.join(job_servers) or 'none'}")
 
     if any(spec.startswith("cline:") for spec in models.effective(choices).values() if spec):
         providers.restart_stale_cline_hubs(run.say)
@@ -1017,7 +1098,7 @@ def main(argv):
         claude_key = key_env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
 
     def wrap(spec, worker=False):
-        agent = make_agent(spec, args.timeout, worker=worker, mcp_config=mcp_config, key_env=key_env,
+        agent = make_agent(spec, args.timeout, worker=worker, mcp=job_tools, key_env=key_env,
                            claude_api_key=claude_key)
         agent.on_activity = run.activity
         return Retrying(agent, pacer, run.say, usage=usage,
@@ -1090,31 +1171,6 @@ def load_resume(old, trees_root):
 
 
 SHOTS = os.path.join(STATE, "shots")
-MCP_SERVERS = {
-    "context7": {"type": "stdio", "command": "npx", "args": ["-y", "@upstash/context7-mcp"]},
-    "playwright": {"type": "stdio", "command": "npx",
-                   "args": ["-y", "@playwright/mcp@latest", "--headless", "--isolated", "--output-dir", SHOTS]},
-}
-
-
-def ensure_mcp_config():
-    """The only MCP servers agents get: current library docs and a headless browser.
-    Claude agents load exactly this file (never the person's other connectors);
-    Cline workers get the same two through Cline's own MCP settings."""
-    path = os.path.join(STATE, "mcp.json")
-    os.makedirs(SHOTS, exist_ok=True)
-    wanted = {"mcpServers": MCP_SERVERS}
-    try:
-        with open(path) as fh:
-            current = json.load(fh)
-    except (OSError, ValueError):
-        current = None
-    if current != wanted:
-        with open(path, "w") as fh:
-            json.dump(wanted, fh, indent=2)
-    return path
-
-
 def mark_resumed(old_dir, new_dir):
     path = os.path.join(old_dir, "metadata.json")
     try:

@@ -11,7 +11,7 @@ import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-from . import gitops, memory, planner
+from . import gitops, memory, planner, rules
 from .contract import Contract
 from .waves import waves
 from .worker import UnitSpec, Worker
@@ -74,10 +74,22 @@ class Orchestrator:
             self.branch = f"mp/{name}"
             self.tree = os.path.join(trees_root, name)
         self.subtrees = []
+        self.rules_loaded = False
         self.cline_refs_before = gitops.cline_refs(repo)   # the person's own Cline checkpoints stay
 
     def say(self, message):
         self.ctx.say(message)
+
+    def load_rules(self):
+        """The project's CLAUDE.md, AGENTS.md and the like, for every role (see rules.py)."""
+        self.rules_loaded = True
+        files, text = rules.collect(self.state_dir, self.repo, self.tree if os.path.isdir(self.tree) else None)
+        self.ctx.project_rules = text
+        self.ctx.run.write_json("rules.json", {"files": files, "enabled": rules.enabled(self.state_dir, self.repo)})
+        if files:
+            self.say(f"   project rules: {', '.join(files)}")
+        elif not rules.enabled(self.state_dir, self.repo):
+            self.say("   project rules: switched off for this project")
 
     def outcome(self, approved, text, **extra):
         if not approved and self.ctx.stop_reason == "stopped by you":
@@ -122,6 +134,7 @@ class Orchestrator:
             gitops.worktree_add(self.repo, self.tree, self.branch, base)
             run.phase("planning")
             self.say(f"── planning with {ctx.planner.name}")
+            self.load_rules()
             recalled = memory.recall(self.state_dir, self.repo)
             if recalled:
                 self.say("   remembering what earlier runs on this project settled")
@@ -135,6 +148,8 @@ class Orchestrator:
             if planner.validate(plan, self.tree):
                 return self.finish(self.outcome(False, "NOT approved: no planner and no usable check; add "
                                                        "agent-check.sh or pass --check", mode=None))
+        if not self.rules_loaded:
+            self.load_rules()
         run.write_json("plan.json", plan)
         contract = Contract.from_dict(plan["contract"])
         mode = plan["mode"]

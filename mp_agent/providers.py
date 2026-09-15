@@ -448,9 +448,10 @@ class ClaudeAgent(Agent):
     """Judges and planners read; workers may edit and run commands, inside their
     worktree, without stopping to ask (the same trust Cline's auto-approve has)."""
 
-    def __init__(self, model="sonnet", timeout=900, tools="Read,Grep,Glob", worker=False, mcp_config=None,
-                 api_key=None):
-        self.model, self.timeout, self.worker, self.mcp_config = model, timeout, worker, mcp_config
+    def __init__(self, model="sonnet", timeout=900, tools="Read,Grep,Glob", worker=False, mcp=None,
+                 api_key=None, key_env=None):
+        self.model, self.timeout, self.worker, self.mcp = model, timeout, worker, mcp
+        self.key_env = key_env or {}
         self.tools = "Read,Grep,Glob,Edit,Write,Bash" if worker else tools
         self.name = f"claude:{model}"
         self.pace_key = "claude"
@@ -460,13 +461,13 @@ class ClaudeAgent(Agent):
         self.billing = "api" if api_key else "subscription"
 
     def ask(self, system, prompt, cwd):
-        # Only the MCP servers in our own config (docs and a browser) are loaded, never
-        # the person's other connectors (mail, drive, calendar): --strict-mcp-config.
+        # Only the job's MCP list (mcp.py) is loaded, never the person's other connectors
+        # (mail, drive, calendar): --strict-mcp-config.
         cmd = ["claude", "-p", "--model", self.model, "--tools", self.tools, "--add-dir", cwd, "--output-format",
                "stream-json", "--verbose", "--strict-mcp-config", "--no-session-persistence",
                "--append-system-prompt", system]
-        if self.mcp_config and os.path.exists(self.mcp_config):
-            cmd[2:2] = ["--mcp-config", self.mcp_config, "--allowedTools", "mcp__context7,mcp__playwright"]
+        if self.mcp and self.mcp.servers:
+            cmd[2:2] = ["--mcp-config", self.mcp.claude_file, "--allowedTools", ",".join(f"mcp__{n}" for n in self.mcp.servers)]
         if self.worker:
             cmd[2:2] = ["--permission-mode", "bypassPermissions"]
 
@@ -481,6 +482,9 @@ class ClaudeAgent(Agent):
                 return None
             return None
         env = claude_env()
+        for name in (self.mcp.env_keys if self.mcp else []):
+            if self.key_env.get(name):
+                env[name] = self.key_env[name]              # an MCP server's key, e.g. CONTEXT7_API_KEY
         if self.api_key:
             env["ANTHROPIC_API_KEY"] = self.api_key
         reply = run_cli(cmd, cwd, self.timeout, stdin_text=prompt, env=env, on_line=self._watcher(parse))
@@ -509,24 +513,31 @@ class ClaudeAgent(Agent):
 
 
 class QwenAgent(Agent):
-    def __init__(self, model="deepseek-flash", timeout=900, worker=False):
-        self.model, self.timeout, self.worker = model, timeout, worker
+    def __init__(self, model="deepseek-flash", timeout=900, worker=False, mcp=None, key_env=None):
+        self.model, self.timeout, self.worker, self.mcp, self.key_env = model, timeout, worker, mcp, key_env or {}
         self.name = f"qwen:{model}"
         self.pace_key = "qwen"
 
     def ask(self, system, prompt, cwd):
-        mode = ["--approval-mode", "yolo"] if self.worker else ["--safe-mode", "--approval-mode", "plan"]
-        cmd = ["qwen", *mode, "--max-tool-calls", "60", "--add-dir", cwd, "-m", self.model,
-               fit_arg(f"{system}\n\n{prompt}")]
-        return run_cli(cmd, cwd, self.timeout)
+        servers = list(self.mcp.servers) if self.mcp else []
+        # Plan approval mode keeps a judge read-only. Safe mode would also switch MCP off, so it is
+        # used only when there are no servers to give.
+        mode = ["--approval-mode", "yolo"] if self.worker else (["--approval-mode", "plan"] if servers
+                                                               else ["--safe-mode", "--approval-mode", "plan"])
+        cmd = ["qwen"]
+        if servers:
+            # a list option: kept before the other options so it cannot swallow the prompt
+            cmd += ["--allowed-mcp-server-names", *servers, "--mcp-config", self.mcp.gemini_file]
+        cmd += [*mode, "--max-tool-calls", "60", "--add-dir", cwd, "-m", self.model, fit_arg(f"{system}\n\n{prompt}")]
+        return run_cli(cmd, cwd, self.timeout, env={**os.environ, **self.key_env})
 
 
 class CodexAgent(Agent):
     """GPT models through the codex CLI (ChatGPT plan). Judges run in a read-only
     sandbox; workers may write inside the worktree."""
 
-    def __init__(self, model, timeout=900, worker=False):
-        self.model, self.timeout, self.worker = model, timeout, worker
+    def __init__(self, model, timeout=900, worker=False, mcp=None, key_env=None):
+        self.model, self.timeout, self.worker, self.mcp, self.key_env = model, timeout, worker, mcp, key_env or {}
         self.name = f"codex:{model}"
         self.pace_key = "codex"
         self.billing = "subscription"
@@ -535,10 +546,11 @@ class CodexAgent(Agent):
         with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as last:
             last_path = last.name
         try:
-            cmd = ["codex", "exec", "-m", self.model, "-s", "workspace-write" if self.worker else "read-only",
+            cmd = ["codex", "exec", *(self.mcp.codex if self.mcp else []), "-m", self.model,
+                   "-s", "workspace-write" if self.worker else "read-only",
                    "-C", cwd, "--skip-git-repo-check", "--ephemeral", "--color", "never", "-o", last_path,
                    fit_arg(f"{system}\n\n{prompt}")]
-            reply = run_cli(cmd, cwd, self.timeout)
+            reply = run_cli(cmd, cwd, self.timeout, env={**os.environ, **self.key_env})
             with open(last_path, errors="replace") as fh:
                 final = fh.read().strip()
         finally:
@@ -550,8 +562,8 @@ class CodexAgent(Agent):
 
 
 class GeminiAgent(Agent):
-    def __init__(self, model="default", timeout=900, worker=False, key_env=None):
-        self.model, self.timeout, self.worker, self.key_env = model, timeout, worker, key_env or {}
+    def __init__(self, model="default", timeout=900, worker=False, key_env=None, mcp=None):
+        self.model, self.timeout, self.worker, self.key_env, self.mcp = model, timeout, worker, key_env or {}, mcp
         self.name = f"gemini:{model}"
         self.pace_key = "gemini"
 
@@ -562,7 +574,11 @@ class GeminiAgent(Agent):
                "-p", fit_arg(f"{system}\n\n{prompt}")]
         if self.model and self.model != "default":
             cmd[1:1] = ["-m", self.model]
-        reply = run_cli(cmd, cwd, self.timeout, env={**os.environ, **self.key_env})
+        env = {**os.environ, **self.key_env}
+        if self.mcp and self.mcp.servers:
+            env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = self.mcp.gemini_file
+            cmd[1:1] = ["--allowed-mcp-server-names", *self.mcp.servers]
+        reply = run_cli(cmd, cwd, self.timeout, env=env)
         try:
             data = json.loads(reply.text[reply.text.index("{"):])
             return Reply(str(data.get("response") or ""), reply.status, reply.seconds)
@@ -617,8 +633,8 @@ class OpenCodeAgent(Agent):
 
     LOCAL = {"ollama", "lmstudio", "llamacpp", "llama.cpp", "local"}
 
-    def __init__(self, model, timeout=900, worker=False, key_env=None):
-        self.model, self.timeout, self.worker, self.key_env = model, timeout, worker, key_env or {}
+    def __init__(self, model, timeout=900, worker=False, key_env=None, mcp=None):
+        self.model, self.timeout, self.worker, self.key_env, self.mcp = model, timeout, worker, key_env or {}, mcp
         provider = model.split("/", 1)[0]
         self.name = f"opencode:{model}"
         self.pace_key = f"opencode-{provider}"
@@ -627,10 +643,13 @@ class OpenCodeAgent(Agent):
     def ask(self, system, prompt, cwd):
         cmd = ["opencode", "run", "--format", "json", "--model", self.model, "--dir", cwd]
         env = {**os.environ, **self.key_env}
+        config = {"mcp": self.mcp.opencode} if self.mcp and self.mcp.servers else {}
         if self.worker:
             cmd.append("--auto")
         else:
-            env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": {"edit": "deny"}})
+            config["permission"] = {"edit": "deny"}
+        if config:
+            env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
         cmd.append(fit_arg(f"{system}\n\n{prompt}"))
 
         def parse(line):
@@ -672,28 +691,29 @@ class OpenCodeAgent(Agent):
         return Reply("\n".join(texts), reply.status, reply.seconds, row["usd"], usage)
 
 
-def make_agent(spec, timeout=900, worker=False, mcp_config=None, key_env=None, claude_api_key=None):
+def make_agent(spec, timeout=900, worker=False, mcp=None, key_env=None, claude_api_key=None):
     """claude:MODEL | codex:MODEL | antigravity:MODEL | gemini:MODEL | qwen:MODEL | cline:PROVIDER:MODEL
     | opencode:PROVIDER/MODEL
 
+    mcp: the job's MCP servers (mcp.Tools), handed to each tool its own way.
     key_env: {ENV_NAME: key} from keys.environment(), for the tools that read keys from
     their environment. claude_api_key: set only when the person chose API billing for Claude Code."""
     kind, _, rest = spec.partition(":")
     if kind == "claude":
-        return ClaudeAgent(rest or "sonnet", timeout, worker=worker, mcp_config=mcp_config, api_key=claude_api_key)
+        return ClaudeAgent(rest or "sonnet", timeout, worker=worker, mcp=mcp, api_key=claude_api_key, key_env=key_env)
     if kind == "codex":
-        return CodexAgent(rest, timeout, worker=worker)
+        return CodexAgent(rest, timeout, worker=worker, mcp=mcp, key_env=key_env)
     if kind == "gemini":
-        return GeminiAgent(rest or "default", timeout, worker=worker, key_env=key_env)
+        return GeminiAgent(rest or "default", timeout, worker=worker, key_env=key_env, mcp=mcp)
     if kind == "antigravity":
         return AntigravityAgent(rest, timeout, worker=worker)
     if kind == "qwen":
-        return QwenAgent(rest or "deepseek-flash", timeout, worker=worker)
+        return QwenAgent(rest or "deepseek-flash", timeout, worker=worker, mcp=mcp, key_env=key_env)
     if kind == "cline":
         provider, _, model = rest.partition(":")
         return ClineAgent(provider, model, timeout)
     if kind == "opencode":
-        return OpenCodeAgent(rest, timeout, worker=worker, key_env=key_env)
+        return OpenCodeAgent(rest, timeout, worker=worker, key_env=key_env, mcp=mcp)
     raise ValueError(f"unknown model {spec!r} (want claude:, codex:, antigravity:, gemini:, qwen:, "
                      "cline:PROVIDER:MODEL or opencode:PROVIDER/MODEL)")
 
