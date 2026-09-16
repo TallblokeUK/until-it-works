@@ -6,7 +6,7 @@ import os
 import tempfile
 import unittest
 
-from helpers import make_repo, sh, write
+from helpers import make_repo, sh, tmpdir, write
 
 from mp_agent import gitops, planner
 from mp_agent.contract import Contract, Decisions
@@ -17,7 +17,7 @@ from mp_agent.waves import CycleError, waves
 
 class GitOps(unittest.TestCase):
     def setUp(self):
-        self.home = tempfile.mkdtemp(prefix="mp-home-")
+        self.home = tmpdir("mp-home-")
 
     def test_new_folder_gets_git(self):
         folder = os.path.join(self.home, "fresh")
@@ -213,7 +213,7 @@ class Classification(unittest.TestCase):
                 return Reply("Credit balance is too low", 1)
 
         said = []
-        agent = Retrying(Broke(), Pacer(tempfile.mkdtemp(), 0), said.append, sleep=lambda *_: None)
+        agent = Retrying(Broke(), Pacer(tmpdir(), 0), said.append, sleep=lambda *_: None)
         self.assertFalse(agent.ask("s", "p", "/tmp").ok)
         self.assertEqual(len(calls), 1)
         self.assertIn("cannot continue", said[0])
@@ -223,7 +223,7 @@ class Costs(unittest.TestCase):
     def test_usage_counts_only_this_runs_sessions_and_splits_by_billing(self):
         import json as j
         from mp_agent.providers import Usage, cost_line, summarize_costs
-        root = tempfile.mkdtemp()
+        root = tmpdir()
         for sid, cwd, costs in [("a", "/trees/run1", [0.001, 0.002]), ("b", "/trees/run1-reader", [0.004]),
                                 ("c", "/trees/run2", [9.0])]:
             os.makedirs(os.path.join(root, sid))
@@ -250,7 +250,7 @@ class TokenUsage(unittest.TestCase):
     def test_cline_usage_per_model_and_claude_reports_add_up(self):
         import json as j
         from mp_agent.providers import Usage, cline_usage
-        root = tempfile.mkdtemp()
+        root = tmpdir()
         os.makedirs(os.path.join(root, "s1"))
         with open(os.path.join(root, "s1", "s1.json"), "w") as fh:
             j.dump({"cwd": "/trees/run1", "provider": "inception", "model": "mercury-2.5"}, fh)
@@ -309,7 +309,7 @@ class ModelChoice(unittest.TestCase):
 
     def test_config_round_trip_keeps_defaults(self):
         from mp_agent import models
-        state = tempfile.mkdtemp()
+        state = tmpdir()
         self.assertEqual(models.load_config(state), models.BUILTIN)
         models.save_config(state, {"judge": "claude:opus", "reviewer": "claude:haiku"})
         self.assertEqual(models.load_config(state)["judge"], "claude:opus")
@@ -328,17 +328,20 @@ class ModelChoice(unittest.TestCase):
         openai = found["openai"]["roles"]
         self.assertEqual(openai["worker"], "codex:gpt-5.6-luna")
         self.assertNotEqual(openai["judge"], openai["worker"])
-        self.assertEqual(found["claude"]["roles"]["reviewer"], "claude:haiku")
+        # the reviewing stays at the workers' level: Haiku measured worst of every worker (docs/benchmarks.md)
+        self.assertEqual(found["claude"]["roles"]["reviewer"], "claude:sonnet")
         only_claude = {p["id"]: p for p in models.presets([o for o in self.OPTIONS if o["spec"].startswith("claude")])}
         self.assertIsNone(only_claude["fast"]["roles"])
         self.assertIn("a worker", only_claude["fast"]["missing"][0])
-        state = tempfile.mkdtemp()
+        state = tmpdir()
         roles, problem = models.apply_preset(state, "fast", self.OPTIONS)
         self.assertIsNone(problem)
         self.assertEqual(models.load_tuning(state)["panel_size"], 3)
-        _, problem = models.apply_preset(state, "claude", self.OPTIONS)       # no haiku here: reviewer falls back
+        _, problem = models.apply_preset(state, "claude", self.OPTIONS)
         self.assertIsNone(problem)
-        self.assertEqual(models.load_config(state)["reviewer"], "")
+        saved = models.load_config(state)
+        self.assertEqual(saved["reviewer"], "claude:sonnet")     # the workers' own model, reviewing with fresh eyes
+        self.assertEqual(saved["worker"], "claude:sonnet")
         self.assertEqual(models.load_tuning(state)["panel_size"], 1)
         self.assertIn("needs", models.apply_preset(state, "fast", self.OPTIONS[:2])[1])
 
@@ -347,7 +350,7 @@ class ModelChoice(unittest.TestCase):
         import stat
         from unittest import mock
         from mp_agent.providers import make_agent
-        bin_dir, seen = tempfile.mkdtemp(), tempfile.mktemp()
+        bin_dir, seen = tmpdir(), tempfile.mktemp()
         fake = os.path.join(bin_dir, "opencode")
         events = [{"type": "step_start", "part": {}},
                   {"type": "tool_use", "part": {"tool": "read", "state": {"input": {"filePath": "a.py"}}}},
@@ -363,11 +366,11 @@ class ModelChoice(unittest.TestCase):
         os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
         with mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}):
             judge = make_agent("opencode:ollama/qwen3")
-            reply = judge.ask("SYSTEM", "PROMPT", tempfile.mkdtemp())
+            reply = judge.ask("SYSTEM", "PROMPT", tmpdir())
             with open(seen) as fh:
                 judge_args = fh.read()
             worker = make_agent("opencode:openrouter/qwen/qwen3-coder", worker=True)
-            worker.ask("SYSTEM", "PROMPT", tempfile.mkdtemp())
+            worker.ask("SYSTEM", "PROMPT", tmpdir())
             with open(seen) as fh:
                 worker_args = fh.read()
         self.assertTrue(reply.ok)
@@ -449,7 +452,7 @@ class ToolActivity(unittest.TestCase):
         from unittest import mock
         from mp_agent import providers
         from mp_agent import mcp
-        tools = mcp.Tools({"docs": {"command": "npx", "args": ["-y", "docs"]}}, tempfile.mkdtemp())
+        tools = mcp.Tools({"docs": {"command": "npx", "args": ["-y", "docs"]}}, tmpdir())
         path = tools.claude_file
         agent = providers.make_agent("claude:opus", mcp=tools)
         result = '{"type":"result","result":"VERDICT: APPROVED","total_cost_usd":0.1,"modelUsage":{}}'
@@ -464,7 +467,7 @@ class ToolActivity(unittest.TestCase):
 class Places(unittest.TestCase):
     def test_local_repos_found_newest_first_and_github_names_parsed(self):
         from mp_agent import where
-        home = tempfile.mkdtemp(prefix="mp-home-")
+        home = tmpdir("mp-home-")
         for name, remote in (("alpha", "git@github.com:someone/alpha.git"), ("work/beta", "https://github.com/keepout/beta"),
                              (".hidden/gamma", "")):
             path = os.path.join(home, name)
@@ -476,7 +479,7 @@ class Places(unittest.TestCase):
             sh(path, "git", "add", "-A")
             sh(path, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c")
         write(os.path.join(home, "alpha"), "f.txt", "changed")
-        state = tempfile.mkdtemp(prefix="mp-state-")
+        state = tmpdir("mp-state-")
         write(state, "config.json", json.dumps({"protected": ["KeepOut"]}))
         repos = where.local_repos(home, state_dir=state)
         names = [r["name"] for r in repos]
@@ -497,7 +500,7 @@ class Places(unittest.TestCase):
 class QueueAndHistory(unittest.TestCase):
     def test_queue_order_remove_and_history(self):
         from mp_agent import jobqueue
-        state = tempfile.mkdtemp()
+        state = tmpdir()
         a = jobqueue.add(state, "first task", ["--new"])
         b = jobqueue.add(state, "second task", ["--repo", "/x"])
         c = jobqueue.add(state, "third task", ["--oneoff"])
@@ -511,7 +514,7 @@ class QueueAndHistory(unittest.TestCase):
     def test_history_counts_gates_and_projects(self):
         import json as j
         from mp_agent import history
-        runs = tempfile.mkdtemp()
+        runs = tmpdir()
         run = os.path.join(runs, "20260915T000000Z-x")
         os.makedirs(run)
         with open(os.path.join(run, "plan.json"), "w") as fh:
@@ -533,7 +536,7 @@ class StartArguments(unittest.TestCase):
     def test_start_keeps_the_spending_cap_out_of_the_task(self):
         from unittest import mock
         from mp_agent import cli
-        home = tempfile.mkdtemp(prefix="mp-home-")
+        home = tmpdir("mp-home-")
         launched = {}
 
         def fake_launch(command, cwd):
@@ -567,7 +570,7 @@ class Tidy(unittest.TestCase):
     def test_plans_then_tidies_only_leftovers_and_archives_runs(self):
         import json as j
         from mp_agent import tidy
-        state = tempfile.mkdtemp(prefix="mp-state-")
+        state = tmpdir("mp-state-")
         project = make_repo({"a.txt": "a"})
         for name, repo in (("20260915T000001Z-gone", "/nonexistent/project"), ("20260915T000002Z-here", project)):
             run = os.path.join(state, "runs", name)
@@ -606,7 +609,7 @@ class Tidy(unittest.TestCase):
 
 class Pacing(unittest.TestCase):
     def test_learns_from_refusals_and_recovers(self):
-        pacer = Pacer(tempfile.mkdtemp(), floor=3)
+        pacer = Pacer(tmpdir(), floor=3)
         self.assertEqual(pacer.interval("inception"), 3)
         self.assertEqual(pacer.refused("inception"), 20)
         self.assertEqual(pacer.refused("inception"), 40)
@@ -619,7 +622,7 @@ class Pacing(unittest.TestCase):
 
     def test_waits_are_recorded(self):
         waited = []
-        pacer = Pacer(tempfile.mkdtemp(), floor=0.3, record=waited.append)
+        pacer = Pacer(tmpdir(), floor=0.3, record=waited.append)
         pacer.wait_turn("k")
         pacer.wait_turn("k")
         self.assertEqual(len(waited), 1)
@@ -640,7 +643,7 @@ class Retries(unittest.TestCase):
                 return replies.pop(0)
 
         said, slept = [], []
-        agent = Retrying(Flaky(), Pacer(tempfile.mkdtemp(), 0, sleep=lambda *_: None), said.append, retries=4,
+        agent = Retrying(Flaky(), Pacer(tmpdir(), 0, sleep=lambda *_: None), said.append, retries=4,
                          sleep=slept.append)
         self.assertTrue(agent.ask("s", "p", "/tmp").ok)
         self.assertEqual(slept, [30, 120, 120])   # transient, then rate (2nd step), then missing (3rd step)
@@ -655,7 +658,7 @@ class Retries(unittest.TestCase):
                 Broken.calls += 1
                 return Reply("TypeError: something in the model's own work", 1)
 
-        agent = Retrying(Broken(), Pacer(tempfile.mkdtemp(), 0), lambda *_: None, sleep=lambda *_: None)
+        agent = Retrying(Broken(), Pacer(tmpdir(), 0), lambda *_: None, sleep=lambda *_: None)
         self.assertFalse(agent.ask("s", "p", "/tmp").ok)
         self.assertEqual(Broken.calls, 1)
 
@@ -667,7 +670,7 @@ if __name__ == "__main__":
 class Keys(unittest.TestCase):
     def setUp(self):
         from unittest import mock
-        self.state = tempfile.mkdtemp(prefix="mp-keys-")
+        self.state = tmpdir("mp-keys-")
         self.patch = mock.patch.dict(os.environ, {"MP_KEYS_BACKEND": "file"})
         self.patch.start()
         for name in ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
@@ -731,7 +734,7 @@ class Setup(unittest.TestCase):
     def test_scan_says_what_is_ready_and_what_to_do_next(self):
         from unittest import mock
         from mp_agent import models, setup
-        state = tempfile.mkdtemp(prefix="mp-setup-")
+        state = tmpdir("mp-setup-")
         options = [{"spec": "claude:opus", "label": "Opus"}, {"spec": "claude:sonnet", "label": "Sonnet"},
                    {"spec": "cline:inception:mercury-2.5", "label": "Mercury"}]
         which = {"claude": "/bin/claude", "cline": "/bin/cline", "gemini": "/bin/gemini"}
@@ -769,7 +772,7 @@ class Setup(unittest.TestCase):
             made.update(spec=spec, worker=worker)
             return Fake()
 
-        state = tempfile.mkdtemp(prefix="mp-setup-")
+        state = tmpdir("mp-setup-")
         with mock.patch.object(setup, "make_agent", side_effect=fake_make), \
                 mock.patch.dict(os.environ, {"MP_KEYS_BACKEND": "file"}):
             good = setup.test_model(state, "x:good")
@@ -789,7 +792,7 @@ class WorkshopServer(unittest.TestCase):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-        home, site = tempfile.mkdtemp(prefix="mp-viz-home-"), tempfile.mkdtemp(prefix="mp-viz-page-")
+        home, site = tmpdir("mp-viz-home-"), tmpdir("mp-viz-page-")
         write(site, "viz/index.html", "<p>hi</p>")
         write(site, "viz/eggs/cat.js", "window.cat = 1;")
         write(site, "secret.js", "nope")
@@ -832,7 +835,7 @@ class WorkshopServer(unittest.TestCase):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-        home = tempfile.mkdtemp(prefix="mp-viz-home-")
+        home = tmpdir("mp-viz-home-")
         env = {**os.environ, "MP_VIZ_PORT": str(port), "MP_HOME": home, "MP_RUNS": os.path.join(home, "runs"),
                "MP_KEYS_BACKEND": "file"}
         env.pop("OPENROUTER_API_KEY", None)
@@ -949,7 +952,7 @@ class Launchers(unittest.TestCase):
         self.assertIn("name: mp-agent", codex)
         self.assertNotIn("$ARGUMENTS", codex)                # Codex skills do not substitute it
         self.assertIn("The task is the text that follows", launchers.render("cline"))
-        home = tempfile.mkdtemp(prefix="mp-launch-")
+        home = tmpdir("mp-launch-")
         os.makedirs(os.path.join(home, ".claude", "commands"))
         os.makedirs(os.path.join(home, ".gemini"))
         write(os.path.join(home, ".claude", "commands"), "mp-agent.md", "my own command\n")
@@ -967,7 +970,7 @@ class Launchers(unittest.TestCase):
 class Answers(unittest.TestCase):
     def test_a_half_written_answer_is_waited_for_not_a_crash(self):
         from mp_agent.context import Context
-        folder = tempfile.mkdtemp(prefix="mp-answer-")
+        folder = tmpdir("mp-answer-")
         path = os.path.join(folder, "answer.json")
         self.assertIsNone(Context._read_answer(path))            # not there yet
         write(folder, "answer.json", "")
@@ -989,7 +992,7 @@ class AppIcon(unittest.TestCase):
         self.assertEqual((width, height), (64, 64))
         idat = data[data.index(b"IDAT") + 4:data.index(b"IEND") - 8]
         self.assertEqual(len(zlib.decompress(idat)), 64 * (64 * 4 + 1))
-        home = tempfile.mkdtemp(prefix="mp-app-")
+        home = tmpdir("mp-app-")
         written = appicon.install(home, "/opt/uiw/bin/mp-viz", path_value="/usr/bin:/it's/here", platform="linux")
         desktop = next(p for p in written if p.endswith(".desktop"))
         with open(desktop) as fh:
@@ -1003,7 +1006,7 @@ class AppIcon(unittest.TestCase):
         self.assertIn("--window", script)
         out = subprocess.run(["sh", "-c", script.replace("exec ", "echo PATH=$PATH; : ", 1)], capture_output=True, text=True)
         self.assertIn("PATH=/usr/bin:/it's/here", out.stdout)             # a quote in PATH survives
-        mac_home = tempfile.mkdtemp(prefix="mp-app-mac-")
+        mac_home = tmpdir("mp-app-mac-")
         mac = appicon.install(mac_home, "/opt/uiw/bin/mp-viz", path_value="/usr/bin", platform="darwin")
         app = appicon.paths(mac_home, "darwin")["app"]
         self.assertIn(app, mac)
@@ -1016,7 +1019,7 @@ class Protected(unittest.TestCase):
     def test_protect_add_remove_keeps_the_rest_of_the_config(self):
         from unittest import mock
         from mp_agent import cli, where
-        state = tempfile.mkdtemp(prefix="mp-protect-")
+        state = tmpdir("mp-protect-")
         write(state, "config.json", json.dumps({"max_usd": 3, "protected": ["someone"]}))
         with mock.patch.object(cli, "STATE", state):
             self.assertEqual(cli.protect_command(["add", "Other/Repo"]), 0)
@@ -1033,8 +1036,8 @@ class Protected(unittest.TestCase):
 class ClineHub(unittest.TestCase):
     def test_a_hub_whose_folder_was_removed_is_restarted_and_a_healthy_one_is_left(self):
         from mp_agent import providers
-        alive = tempfile.mkdtemp(prefix="mp-hub-")
-        gone = os.path.join(tempfile.mkdtemp(prefix="mp-hub-"), "removed-worktree")
+        alive = tmpdir("mp-hub-")
+        gone = os.path.join(tmpdir("mp-hub-"), "removed-worktree")
         processes = [(111, f"node .cline --cline-hub-daemon --cwd {gone} --host 127.0.0.1 --port 1"),
                      (222, f"node .cline --cline-hub-daemon --cwd {alive} --host 127.0.0.1 --port 2"),
                      (333, "cline --cwd /x something else")]
@@ -1045,9 +1048,9 @@ class Projects(unittest.TestCase):
     def test_projects_count_runs_and_results_waiting_for_a_decision(self):
         import json as j
         from mp_agent import history, projects
-        runs = tempfile.mkdtemp(prefix="mp-proj-runs-")
-        shop, blog = tempfile.mkdtemp(prefix="shop-"), tempfile.mkdtemp(prefix="blog-")
-        gone = os.path.join(tempfile.mkdtemp(), "deleted")
+        runs = tmpdir("mp-proj-runs-")
+        shop, blog = tmpdir("shop-"), tmpdir("blog-")
+        gone = os.path.join(tmpdir(), "deleted")
 
         def run(name, project, meta, live=False):
             d = os.path.join(runs, name)
@@ -1076,9 +1079,9 @@ class Projects(unittest.TestCase):
 
     def test_two_folders_with_the_same_name_are_told_apart(self):
         from mp_agent import projects
-        runs = tempfile.mkdtemp(prefix="mp-proj-runs-")
-        a = os.path.join(tempfile.mkdtemp(prefix="clientA-"), "site")
-        b = os.path.join(tempfile.mkdtemp(prefix="clientB-"), "site")
+        runs = tmpdir("mp-proj-runs-")
+        a = os.path.join(tmpdir("clientA-"), "site")
+        b = os.path.join(tmpdir("clientB-"), "site")
         for i, path in enumerate((a, b)):
             os.makedirs(path)
             d = os.path.join(runs, f"r{i}")
@@ -1092,14 +1095,14 @@ class Projects(unittest.TestCase):
 class ProjectRules(unittest.TestCase):
     def test_finds_every_kind_of_instruction_file_once_and_respects_the_switch(self):
         from mp_agent import rules
-        repo = tempfile.mkdtemp(prefix="mp-rules-")
+        repo = tmpdir("mp-rules-")
         write(repo, "CLAUDE.md", "Use tabs.")
         write(repo, "AGENTS.md", "Use tabs.")                              # an identical copy is given once
         write(repo, ".cursor/rules/php.mdc", "PHP must pass phpcs.")
         write(repo, ".clinerules/style.md", "No jQuery.")
         write(repo, ".github/copilot-instructions.md", "British English.")
         write(repo, "rules.md", "x" * (rules.PER_FILE + 500))
-        outside = tempfile.mkdtemp(prefix="mp-outside-")
+        outside = tmpdir("mp-outside-")
         write(outside, "secret.md", "not the project's")
         os.symlink(os.path.join(outside, "secret.md"), os.path.join(repo, "CONVENTIONS.md"))
         found = dict(rules.find(repo))
@@ -1109,7 +1112,7 @@ class ProjectRules(unittest.TestCase):
         text = rules.render(rules.find(repo))
         self.assertTrue(text.startswith("# Project rules"))
         self.assertIn("never override the rules of this loop", text)
-        state = tempfile.mkdtemp(prefix="mp-rules-state-")
+        state = tmpdir("mp-rules-state-")
         self.assertTrue(rules.collect(state, repo)[1])
         rules.set_enabled(state, repo, False)
         self.assertEqual(rules.collect(state, repo), ([], ""))
@@ -1140,7 +1143,7 @@ class RepoInfo(unittest.TestCase):
         sh(repo, "git", "remote", "add", "origin", "https://someone:ghp_secret123@github.com/client/site.git")
         sh(repo, "git", "remote", "add", "mine", "git@github.com:me/site.git")
         sh(repo, "git", "remote", "add", "work", "git@github.com:my-org/site.git")
-        state = tempfile.mkdtemp(prefix="mp-repo-state-")
+        state = tmpdir("mp-repo-state-")
         info = repoinfo.inspect(repo, state, run=self.fake_gh({"client/site": "WRITE", "me/site": "ADMIN"}))
         remotes = {r["name"]: r for r in info["remotes"]}
         self.assertEqual((remotes["mine"]["yours"], remotes["work"]["yours"], remotes["origin"]["yours"]), (True, True, False))
@@ -1157,12 +1160,12 @@ class RepoInfo(unittest.TestCase):
         write(repo, "b.txt", "uncommitted")
         repoinfo._CACHE.clear()
         self.assertTrue(any("uncommitted" in w for w in repoinfo.inspect(repo, state, run=self.fake_gh({}))["warnings"]))
-        plain = tempfile.mkdtemp(prefix="mp-not-git-")
+        plain = tmpdir("mp-not-git-")
         self.assertIn("not a git repository", repoinfo.inspect(plain, state, run=self.fake_gh({}))["warnings"][0])
 
     def test_folder_browser_stays_inside_home_and_marks_git_projects(self):
         from mp_agent import repoinfo
-        home = tempfile.mkdtemp(prefix="mp-browse-home-")
+        home = tmpdir("mp-browse-home-")
         os.makedirs(os.path.join(home, "code", "shop", ".git"))
         os.makedirs(os.path.join(home, ".hidden"))
         top = repoinfo.browse(home, home)
@@ -1175,7 +1178,7 @@ class RepoInfo(unittest.TestCase):
 
     def test_opened_folders_join_the_project_list(self):
         from mp_agent import projects
-        state, runs, folder = tempfile.mkdtemp(), tempfile.mkdtemp(), tempfile.mkdtemp(prefix="opened-")
+        state, runs, folder = tmpdir(), tmpdir(), tmpdir("opened-")
         projects.open_project(state, folder)
         listed = projects.list_projects(runs, alive=lambda d: False, extra=projects.opened(state))
         self.assertEqual([(p["path"], p["runs"]) for p in listed], [(os.path.realpath(folder), 0)])
@@ -1185,8 +1188,8 @@ class McpServers(unittest.TestCase):
     def test_one_list_with_scopes_and_every_tool_gets_it_its_own_way(self):
         from unittest import mock
         from mp_agent import mcp, providers
-        state, shots = tempfile.mkdtemp(prefix="mp-mcp-"), "/shots"
-        shop = tempfile.mkdtemp(prefix="shop-")
+        state, shots = tmpdir("mp-mcp-"), "/shots"
+        shop = tmpdir("shop-")
         mcp.add(state, "sentry", mcp.parse_spec('npx -y "@sentry/mcp-server" --org acme', env_keys=["SENTRY_TOKEN"]))
         mcp.add(state, "db", mcp.parse_spec(url="https://mcp.example/db"), project=shop)
         mcp.switch_builtin(state, "playwright", False)
@@ -1200,7 +1203,7 @@ class McpServers(unittest.TestCase):
         servers = mcp.servers_for(state, shots, shop)
         with mock.patch.dict(os.environ, {"SENTRY_TOKEN": "tok-real-secret"}, clear=False):
             os.environ.pop("CONTEXT7_API_KEY", None)
-            tools = mcp.Tools(servers, tempfile.mkdtemp(), codex_own=["node_repl"])
+            tools = mcp.Tools(servers, tmpdir(), codex_own=["node_repl"])
         with open(tools.claude_file) as fh:
             claude = json.load(fh)["mcpServers"]
         self.assertEqual(claude["sentry"]["env"], {"SENTRY_TOKEN": "${SENTRY_TOKEN}"})    # a reference, never the key
@@ -1235,7 +1238,7 @@ class McpServers(unittest.TestCase):
     def test_cline_gets_missing_servers_added_and_keeps_its_own(self):
         from unittest import mock
         from mp_agent import mcp
-        home = tempfile.mkdtemp(prefix="mp-cline-home-")
+        home = tmpdir("mp-cline-home-")
         write(os.path.join(home, ".cline", "data", "settings"), "cline_mcp_settings.json",
               json.dumps({"mcpServers": {"context7": {}, "mine": {}}}))
         ran = []
@@ -1252,7 +1255,7 @@ class PageCheck(unittest.TestCase):
         from mp_agent import pagecheck
         if not pagecheck.find_browser():
             self.skipTest("no Chromium-family browser here")
-        folder = tempfile.mkdtemp(prefix="mp-page-")
+        folder = tmpdir("mp-page-")
         write(folder, "good.html", "<p id=x></p><script>document.getElementById('x').textContent = location.search;</script>")
         write(folder, "bad.html", "<script>\nconst ok = 1;\nif (location.search.includes('boom')) missingThing.go();\n</script>")
         said = []
@@ -1297,3 +1300,64 @@ class SwitchModels(unittest.TestCase):
         self.assertEqual(picks[0], "codex:gpt-5.6-sol")        # the nearest from another account, stronger side first
         self.assertNotIn("claude:sonnet", picks)
         self.assertEqual(models.switch_options("claude:opus", [], limit=3), [])
+
+
+class Bench(unittest.TestCase):
+    def test_a_line_up_is_read_from_what_a_person_types(self):
+        from mp_agent import bench
+        combo = bench.parse_combo("name=fast,worker=cline:inception:mercury-2.5,judge=claude:sonnet")
+        self.assertEqual(combo["name"], "fast")
+        self.assertEqual(combo["roles"], {"worker": "cline:inception:mercury-2.5", "judge": "claude:sonnet"})
+        self.assertEqual(bench.parse_combo("worker=claude:sonnet")["name"], "w:sonnet")
+        for bad in ("", "worker", "critic=claude:sonnet"):
+            with self.assertRaises(ValueError):
+                bench.parse_combo(bad)
+
+    def test_every_bench_task_has_hidden_tests_that_the_starting_files_fail(self):
+        from mp_agent import bench
+        tasks = bench.listing()
+        self.assertTrue(tasks, "there are no bench tasks")
+        for entry in tasks:
+            task = bench.load_task(entry["name"])
+            self.assertTrue(entry["about"], f"{task['name']} has no about.txt")
+            self.assertTrue(os.path.isdir(task["hidden"]), f"{task['name']} has no hidden tests")
+            folder = tmpdir("mp-bench-")
+            bench.prepare(task, folder)
+            sh(folder, "git", "checkout", "-q", "-b", "start")
+            result = bench.grade(folder, "start", task["hidden"])
+            self.assertGreater(result["ran"], 0, f"{task['name']}: the hidden tests did not run: {result['detail']}")
+            self.assertFalse(result["passed"], f"{task['name']}: the hidden tests pass before any work is done")
+
+    def test_the_summary_counts_what_matters(self):
+        from mp_agent import bench
+        rows = [
+            {"combo": "a", "works": True, "approved": True, "seconds": 600, "passes": 2, "counters": {"worker_calls": 4},
+             "costs": {"billed_usd": 0.5}, "upgrades": []},
+            {"combo": "a", "works": False, "approved": True, "seconds": 1200, "passes": 5,
+             "counters": {"worker_calls": 9}, "costs": {"billed_usd": 1.0}, "upgrades": [{}]},
+            {"combo": "b", "works": True, "approved": False, "seconds": 300, "passes": 1, "counters": {},
+             "costs": {}, "upgrades": []},
+            {"combo": "b", "error": "the job did not run"},
+        ]
+        summary = {s["combo"]: s for s in bench.summarize(rows)}
+        self.assertEqual(summary["a"]["false_approvals"], 1)
+        self.assertEqual(summary["a"]["works"], 1)
+        self.assertEqual(summary["a"]["median_minutes"], 15.0)
+        self.assertEqual(summary["b"]["false_rejections"], 1)
+        self.assertEqual(summary["b"]["failed_to_run"], 1)
+        self.assertEqual(summary["b"]["works_rate"], 0.5)
+        self.assertIn("line-up", bench.table(bench.summarize(rows)))
+
+
+class ModelProblems(unittest.TestCase):
+    def test_a_problem_is_remembered_then_cleared_when_it_works_again(self):
+        from mp_agent import models
+        state = tmpdir("mp-problems-")
+        options = [{"spec": "codex:gpt-5.6-luna", "label": "GPT-5.6-Luna (Codex)"}]
+        self.assertIsNone(models.with_problems(state, options)[0].get("problem"))
+        models.note_problem(state, "codex:gpt-5.6-luna", "You've hit your usage limit")
+        self.assertIn("usage limit", models.with_problems(state, options)[0]["problem"])
+        self.assertIn("⚠", models.with_problems(state, options)[0]["label"])
+        self.assertTrue(models.clear_problem(state, "codex:gpt-5.6-luna"))
+        self.assertIsNone(models.with_problems(state, options)[0].get("problem"))
+        self.assertFalse(models.clear_problem(state, "codex:gpt-5.6-luna"))

@@ -89,3 +89,9 @@ reaches it, the job pauses and asks you whether to raise the cap or stop.
 
 Using a subscription through automation is governed by that provider's terms.
 Check them for your plan; an API key is the alternative.
+
+## Which line-up to choose
+
+Not a matter of opinion: [what the numbers say](benchmarks.md) measures line-ups on the
+same tasks, judged by tests the agents never see, and `mp-agent bench` repeats it on your
+own machine.

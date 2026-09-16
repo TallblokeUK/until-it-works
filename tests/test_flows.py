@@ -7,7 +7,7 @@ import tempfile
 import threading
 import unittest
 
-from helpers import Script, approve, context, log, make_repo, sh, wait_for, write
+from helpers import Script, approve, context, log, make_repo, sh, tmpdir, wait_for, write
 
 from mp_agent.orchestrator import Orchestrator
 from mp_agent.providers import Reply
@@ -33,7 +33,7 @@ def single(check=CHECK, **extra):
 
 
 def orchestrate(ctx, repo):
-    trees = tempfile.mkdtemp(prefix="mp-test-trees-")
+    trees = tmpdir("mp-test-trees-")
     return Orchestrator(ctx, "test task", repo, trees).run()
 
 
@@ -376,7 +376,7 @@ class ProviderTrouble(unittest.TestCase):
 class ProjectMemory(unittest.TestCase):
     def test_rulings_are_remembered_and_given_to_the_next_plan(self):
         repo = make_repo()
-        state = tempfile.mkdtemp(prefix="mp-test-state-")
+        state = tmpdir("mp-test-state-")
 
         def review(prompt, cwd):
             if "A1: trailing newline is not required" in prompt:
@@ -410,7 +410,7 @@ class Resume(unittest.TestCase):
         return ctx, Orchestrator(ctx, "test task", repo, trees, resume=info).run()
 
     def test_single_unit_carries_on_from_the_code_on_disk(self):
-        repo, trees = make_repo(), tempfile.mkdtemp(prefix="mp-test-trees-")
+        repo, trees = make_repo(), tmpdir("mp-test-trees-")
         holder = {}
 
         def stop_while_reviewing(prompt, cwd):
@@ -433,7 +433,7 @@ class Resume(unittest.TestCase):
         self.assertEqual(ctx2.decisions.items[0]["text"], "wrote ok")
 
     def test_swarm_keeps_approved_subtasks_and_finishes_the_rest(self):
-        repo, trees = make_repo(), tempfile.mkdtemp(prefix="mp-test-trees-")
+        repo, trees = make_repo(), tmpdir("mp-test-trees-")
         holder = {}
 
         def implement(prompt, cwd):
@@ -532,7 +532,7 @@ class NewTools(unittest.TestCase):
 
     def test_pull_request_refuses_protected_repos_and_repos_without_github(self):
         from mp_agent import actions
-        state = tempfile.mkdtemp(prefix="mp-state-")
+        state = tmpdir("mp-state-")
         write(state, "config.json", json.dumps({"protected": ["keepout/db-web"]}))
         _, run_dir, _ = self.finished(remote="https://github.com/keepout/db-web.git")
         with self.assertRaisesRegex(actions.ActionError, "listed as protected"):

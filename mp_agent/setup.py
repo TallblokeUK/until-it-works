@@ -98,6 +98,8 @@ def test_model(state_dir, spec, timeout=150):
     ok = reply.ok and "READY" in (reply.text or "").upper()
     kind = classify(reply.status, reply.text) if not reply.ok else ("ok" if ok else "failed")
     problem = None
+    if ok:
+        models.clear_problem(state_dir, spec)     # it works now, whatever went wrong before
     if not ok:
         problem = (error_line(reply.text) if not reply.ok else
                    f"it answered, but not as asked: {(reply.text or '').strip()[:120] or '(nothing)'}")

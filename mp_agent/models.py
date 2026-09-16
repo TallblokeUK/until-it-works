@@ -39,18 +39,22 @@ TUNING = {"panel_size": 3, "patience": 3, "churn": 8}
 PRESETS = [
     {"id": "fast", "name": "Fast and cheap",
      "about": "A fast, cheap model does the work many times over and reviews itself with fresh eyes; Claude plans "
-              "and has the last word. Best value, and the quickest.",
+              "and has the last word. The quickest line-up measured (6.9 minutes a task), and the only one that "
+              "bills an API key.",
      "roles": {"worker": ["cline:*:mercury*", "opencode:*mercury*"], "planner": ["claude:sonnet", "codex:*"],
                "judge": ["claude:sonnet", "claude:opus", "codex:*"]},
      "tuning": {"panel_size": 3, "patience": 3, "churn": 8}},
     {"id": "claude", "name": "All Claude",
-     "about": "Everything on a Claude subscription: Opus plans and judges, Sonnet builds, Haiku does the quick "
-              "reviews. Strong, and no API bills.",
+     "about": "Everything on a Claude subscription: Opus plans and judges, Sonnet builds and reviews itself with "
+              "fresh eyes. The steadiest measured (usually one pass), and no API bills.",
+     # Haiku used to do the quick reviews here. Measured as a worker it was the slowest of all and the only
+     # model to spend a whole budget producing nothing, so this preset keeps the reviewing at Sonnet's level.
      "roles": {"planner": ["claude:opus"], "worker": ["claude:sonnet"], "judge": ["claude:opus"],
-               "reviewer": ["claude:haiku"], "panel": ["claude:haiku"]},
+               "reviewer": ["claude:sonnet"], "panel": ["claude:sonnet"]},
      "tuning": {"panel_size": 1, "patience": 2, "churn": 5}},
     {"id": "openai", "name": "All OpenAI",
-     "about": "Everything on a ChatGPT plan through Codex: a fast GPT builds, a stronger one plans and judges.",
+     "about": "Everything on a ChatGPT plan through Codex: a fast GPT builds, a stronger one plans and judges. "
+              "Measured at 10.2 minutes a task, with more passes than Claude needs.",
      "roles": {"worker": ["codex:*luna*", "codex:*mini*", "codex:*"], "planner": ["codex:*sol*", "codex:*"],
                "judge": ["codex:*sol*", "codex:*terra*", "codex:*"]},
      "tuning": {"panel_size": 1, "patience": 2, "churn": 5}},
@@ -340,6 +344,18 @@ def note_problem(state_dir, spec, problem):
     with open(path + ".tmp", "w") as fh:
         json.dump(data, fh)
     os.replace(path + ".tmp", path)
+
+
+def clear_problem(state_dir, spec):
+    """The model works again (usage reset, credit added, logged back in): stop warning about it."""
+    path = os.path.join(state_dir, "model-problems.json")
+    data = _read_json(path) or {}
+    if data.pop(spec, None) is None:
+        return False
+    with open(path + ".tmp", "w") as fh:
+        json.dump(data, fh)
+    os.replace(path + ".tmp", path)
+    return True
 
 
 def with_problems(state_dir, options):

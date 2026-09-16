@@ -1,0 +1,1 @@
+Reading quoted, comma-separated rows by hand: state, escapes and line breaks, where naive answers pass the easy cases and fail the rest.

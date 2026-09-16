@@ -117,6 +117,7 @@ finished. [How it works](docs/how-it-works.md) has the detail.
 | [Setting up](docs/setup.md) | tools, API keys, testing a model, choosing a team |
 | [Starting a job](docs/starting-a-job.md) | from your AI tool, the workshop or a terminal; what happens to the result |
 | [Choosing models](docs/models.md) | the five roles, the presets, costs and billing |
+| [What the numbers say](docs/benchmarks.md) | measured line-ups: what works, what it costs, and how to repeat it |
 | [How it works](docs/how-it-works.md) | the loop, contracts, escalation, safety rails, the workshop |
 | [Adding a tool](docs/adapters.md) | supporting another AI coding tool |
 | [Lessons from the first version](docs/lessons.md) | what was measured, and why the final judge earns its cost |

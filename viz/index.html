@@ -1100,7 +1100,8 @@ function renderHud() {
       (covered ? ` · $${Number(covered).toFixed(2)} API-equivalent on subscriptions (not billed)` : "");
     let how;
     if (resolved && m.oneoff && resolved === "kept") how = `Done. Your files are in ${project}`;
-    else if (resolved) how = `${resolved === "kept" ? "Kept" : "Discarded"}: ${m.resolution.detail}`;
+    else if (resolved === "graded") how = m.resolution.detail;
+  else if (resolved) how = `${resolved === "kept" ? "Kept" : "Discarded"}: ${m.resolution.detail}`;
     else if (m.approved) how = `The work is on branch ${branch}\nin ${project}\n\nTo look first:  cd ${project} && git diff HEAD...${branch}`;
     else how = `Everything it did is on branch ${branch} in ${project}.\nLogs: ${m.run || ""}`;
     $("resultHow").textContent = how + costLine;
@@ -1173,7 +1174,10 @@ function ingest(next, t) {
   for (let i = seen; i < log.length; i++) onLine(log[i], t);
   processActivity(S.activity, t);
   seen = log.length;
+  // The rig runs while a check is running. A unit with no check of its own (the acceptance
+  // tests) never reports pass or fail, so the rig must also stop when the phase moves on.
   if (/check/.test(S.phase)) rigState = "run";
+  else if (rigState === "run") rigState = "idle";
   for (const [id, u] of Object.entries(S.units || {})) if (!NOT_SWARM.test(id)) { const c = swarmWorker(id); c.state = u.state; c.uphase = u.phase || ""; }
   renderHud();
 }

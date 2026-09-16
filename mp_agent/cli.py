@@ -24,6 +24,7 @@
     mp-agent pr [--run DIR] [--base BRANCH]   push a finished run's branch and open a GitHub pull request
     mp-agent queue add [start flags] "task" | list | remove ID | run-next   jobs that run one after another
     mp-agent history [--json]            where the time and money went, and which judges object
+    mp-agent bench [--list] [--task T] [--combo "worker=X,judge=Y"] [--repeat N]   compare model line-ups
     mp-agent tidy [--yes] [--all-runs]   clear mp-agent's own leftovers (never your projects or branches)
     mp-agent config --preset P | --planner|--worker|--reviewer|--panel-model|--judge NAME | --max-usd N
                     | --claude-billing subscription|api   change the defaults
@@ -31,6 +32,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -576,6 +578,85 @@ def resolve(argv, which):
 SELFTEST_TASK = "Fix add() in calc.py so python3 test_calc.py prints ok"
 
 
+def bench(argv):
+    """Compare model line-ups on the same bench tasks, graded by tests the agents never see."""
+    from . import bench as benchmark
+    if argv and argv[0] == "table":
+        folder = argv[1] if len(argv) > 1 else newest_bench()
+        if not folder:
+            print("NEEDS: no bench results yet", file=sys.stderr)
+            return 3
+        print(benchmark.table(benchmark.summarize(benchmark.load_results(folder))))
+        return 0
+    p = argparse.ArgumentParser(prog="mp-agent bench", description=bench.__doc__)
+    p.add_argument("--list", action="store_true", help="the bench tasks and what each one is for")
+    p.add_argument("--task", action="append", default=[], help="a task to run (default: all of them)")
+    p.add_argument("--combo", action="append", default=[],
+                   help='a line-up: "name=fast,worker=cline:inception:mercury-2.5,judge=claude:sonnet"')
+    p.add_argument("--preset", action="append", default=[], help="a line-up taken from a preset, by its id")
+    p.add_argument("--repeat", type=int, default=3, help="runs per task and line-up (default 3)")
+    p.add_argument("--budget", type=float, default=45, help="working minutes per run (default 45)")
+    p.add_argument("--max-calls", type=int, default=250, help="model calls per run (default 250)")
+    p.add_argument("--out", help="where the results go (default: ~/.mp-agent/bench/<date>)")
+    args = p.parse_args(argv)
+
+    if args.list:
+        for task in benchmark.listing():
+            print(f"{task['name']:10} {task['about']}")
+        return 0
+    try:
+        tasks = [benchmark.load_task(name) for name in (args.task or [t["name"] for t in benchmark.listing()])]
+        combos = [benchmark.parse_combo(text) for text in args.combo]
+    except ValueError as exc:
+        print(f"NEEDS: {exc}", file=sys.stderr)
+        return 3
+    for preset in args.preset:
+        roles, missing = models.resolve_preset(preset, installed_models())
+        if not roles:
+            print(f"NEEDS: preset {preset}: {missing}", file=sys.stderr)
+            return 3
+        combos.append({"name": preset, "roles": {r: spec for r, spec in roles.items() if spec}})
+    if not tasks or not combos:
+        print("NEEDS: give at least one --combo or --preset (and see --list for the tasks)", file=sys.stderr)
+        return 3
+
+    out = args.out or os.path.join(STATE, "bench", time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
+    runs_dir = os.path.join(out, "runs")
+    projects = os.path.join(out, "projects")
+    os.makedirs(runs_dir, exist_ok=True)
+    os.makedirs(projects, exist_ok=True)
+    total = len(tasks) * len(combos) * max(1, args.repeat)
+    print(f"{total} run(s): {len(tasks)} task(s) × {len(combos)} line-up(s) × {args.repeat}")
+    print(f"results: {out}")
+    done = 0
+    for task in tasks:
+        for combo in combos:
+            for attempt in range(1, max(1, args.repeat) + 1):
+                done += 1
+                slug = re.sub(r"[^a-z0-9]+", "-", f"{task['name']}-{combo['name']}-{attempt}".lower()).strip("-")
+                print(f"[{done}/{total}] {slug}")
+                row = benchmark.run_one(task, combo, os.path.join(projects, slug), runs_dir, ENTRY,
+                                        budget=args.budget, max_calls=args.max_calls)
+                row["attempt"] = attempt
+                with open(os.path.join(out, slug + ".json"), "w") as fh:
+                    json.dump(row, fh, indent=2)
+    rows = benchmark.load_results(out)
+    summary = benchmark.summarize(rows)
+    with open(os.path.join(out, "summary.json"), "w") as fh:
+        json.dump(summary, fh, indent=2)
+    text = benchmark.table(summary)
+    with open(os.path.join(out, "table.txt"), "w") as fh:
+        fh.write(text + "\n")
+    print("\n" + text)
+    return 0
+
+
+def newest_bench():
+    folder = os.path.join(STATE, "bench")
+    names = sorted(os.listdir(folder), reverse=True) if os.path.isdir(folder) else []
+    return next((os.path.join(folder, n) for n in names if os.path.isdir(os.path.join(folder, n))), None)
+
+
 def selftest(argv):
     """Everything this depends on can change under it (Cline updates itself;
     logins expire), so check the pieces, then do one tiny real task."""
@@ -1044,6 +1125,8 @@ def main(argv):
         return stop(argv[1:])
     if argv and argv[0] in ("keep", "discard"):
         return resolve(argv[1:], argv[0])
+    if argv and argv[0] == "bench":
+        return bench(argv[1:])
     if argv and argv[0] == "selftest":
         return selftest(argv[1:])
     if argv and argv[0] == "resume":

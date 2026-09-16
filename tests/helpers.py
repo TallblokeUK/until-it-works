@@ -1,4 +1,6 @@
+import atexit
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,12 +16,23 @@ from mp_agent.providers import Agent, Reply  # noqa: E402
 from mp_agent.runlog import Run  # noqa: E402
 
 
+# Every temporary folder a test makes lives under one root that is deleted when the run ends.
+# Without this the suite left thousands of folders behind in /tmp, and a day of running it
+# used up the filesystem's inodes: writes failed everywhere with "no space left on device".
+ROOT = tempfile.mkdtemp(prefix="mp-tests-")
+atexit.register(shutil.rmtree, ROOT, ignore_errors=True)
+
+
+def tmpdir(prefix="mp-test-"):
+    return tempfile.mkdtemp(prefix=prefix, dir=ROOT)
+
+
 def sh(cwd, *cmd):
     return subprocess.run(cmd, cwd=cwd, check=True, capture_output=True, text=True).stdout
 
 
 def make_repo(files=None, check_ok=True):
-    root = tempfile.mkdtemp(prefix="mp-test-repo-")
+    root = tmpdir("mp-test-repo-")
     sh(root, "git", "init", "-q", "-b", "main")
     for path, content in (files or {}).items():
         full = os.path.join(root, path)
@@ -89,7 +102,7 @@ def write(cwd, path, content):
 
 
 def context(builder, judge=None, planner_agent=None, reviewer=None, panel=None, **opts):
-    runs = tempfile.mkdtemp(prefix="mp-test-runs-")
+    runs = tmpdir("mp-test-runs-")
     run = Run(runs, "test task", echo=False)
     options = Options(answer_poll=0.05, **opts)
     decisions = Decisions(save=lambda items: run.write_json("decisions.json", items))
