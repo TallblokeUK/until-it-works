@@ -1361,3 +1361,48 @@ class ModelProblems(unittest.TestCase):
         self.assertTrue(models.clear_problem(state, "codex:gpt-5.6-luna"))
         self.assertIsNone(models.with_problems(state, options)[0].get("problem"))
         self.assertFalse(models.clear_problem(state, "codex:gpt-5.6-luna"))
+
+
+class BenchSuggest(unittest.TestCase):
+    ROWS = [
+        {"combo": "cheap", "roles": {"worker": "cline:inception:mercury-2.5"}, "works": True, "approved": True,
+         "seconds": 300, "passes": 3, "counters": {}, "costs": {"billed_usd": 0.2}, "upgrades": []},
+        {"combo": "cheap", "roles": {"worker": "cline:inception:mercury-2.5"}, "works": True, "approved": True,
+         "seconds": 420, "passes": 2, "counters": {}, "costs": {"billed_usd": 0.2}, "upgrades": []},
+        {"combo": "plan", "roles": {"worker": "claude:sonnet", "judge": "claude:opus"}, "works": True,
+         "approved": True, "seconds": 600, "passes": 1, "counters": {}, "costs": {}, "upgrades": []},
+        {"combo": "plan", "roles": {"worker": "claude:sonnet", "judge": "claude:opus"}, "works": True,
+         "approved": True, "seconds": 660, "passes": 1, "counters": {}, "costs": {}, "upgrades": []},
+        {"combo": "flaky", "roles": {"worker": "antigravity:gemini-3.8-flash-high"}, "works": False,
+         "approved": False, "seconds": 120, "passes": 1, "counters": {}, "costs": {}, "upgrades": []},
+        {"combo": "flaky", "roles": {"worker": "antigravity:gemini-3.8-flash-high"}, "works": False,
+         "approved": False, "seconds": 120, "passes": 1, "counters": {}, "costs": {}, "upgrades": []},
+    ]
+
+    def test_it_recommends_by_what_a_person_wants(self):
+        from mp_agent import bench
+        picks = {p["for"]: p for p in bench.suggest(self.ROWS)}
+        self.assertEqual(picks["the quickest"]["combo"], "cheap")
+        self.assertEqual(picks["no API bills"]["combo"], "plan")      # cheap is quicker, but it bills
+        self.assertEqual(picks["the steadiest"]["combo"], "plan")     # one pass, not three
+        self.assertEqual(picks["the quickest"]["billed_per_run"], 0.2)
+        avoid = [p for p in bench.suggest(self.ROWS) if p["for"] == "avoid"]
+        self.assertEqual([p["combo"] for p in avoid], ["flaky"])
+        self.assertEqual(avoid[0]["why"], "no run finished")
+
+    def test_a_line_up_that_never_finished_recommends_nothing(self):
+        from mp_agent import bench
+        only_failures = [r for r in self.ROWS if not r["works"]]
+        self.assertEqual([p["for"] for p in bench.suggest(only_failures)], [])
+        self.assertEqual(bench.suggest([]), [])
+
+    def test_the_measured_presets_carry_their_numbers(self):
+        from mp_agent import models
+        found = {p["id"]: p for p in models.presets([{"spec": s, "label": s} for s in
+                 ("claude:opus", "claude:sonnet", "cline:inception:mercury-2.5", "codex:gpt-5.6-luna",
+                  "codex:gpt-5.6-sol")])}
+        for pid in ("fast", "claude", "openai"):
+            m = found[pid]["measured"]
+            self.assertEqual(m["runs"], 6, pid)
+            self.assertGreater(m["minutes"], 0, pid)
+        self.assertIsNone(found["mixed"]["measured"])      # never run exactly as this preset builds it

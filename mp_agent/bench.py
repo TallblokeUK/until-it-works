@@ -243,6 +243,41 @@ def table(summary):
     return "\n".join(lines)
 
 
+def suggest(rows):
+    """What the results recommend, per thing a person actually wants. A line-up that never
+    finished a run recommends nothing, however fast its failures were."""
+    summary = {s["combo"]: s for s in summarize(rows)}
+    roles = {}
+    for row in rows:
+        roles.setdefault(row["combo"], row.get("roles") or {})
+    usable = [s for s in summary.values() if s["works"] > 0 and s["median_minutes"] is not None]
+    if not usable:
+        return []
+    reliable = [s for s in usable if s["works"] == s["runs"]] or usable
+    picks = []
+
+    def add(what, chosen, why):
+        if chosen and not any(p["combo"] == chosen["combo"] and p["for"] == what for p in picks):
+            picks.append({"for": what, "combo": chosen["combo"], "why": why, "roles": roles.get(chosen["combo"], {}),
+                          "works": f"{chosen['works']}/{chosen['runs']}", "minutes": chosen["median_minutes"],
+                          "billed_per_run": round(chosen["billed_usd"] / max(chosen["runs"], 1), 2)})
+
+    quickest = min(reliable, key=lambda s: s["median_minutes"])
+    add("the quickest", quickest, f"{quickest['median_minutes']} minutes a task, and it worked every time")
+    free = [s for s in reliable if not s["billed_usd"]]
+    if free:
+        cheapest = min(free, key=lambda s: s["median_minutes"])
+        add("no API bills", cheapest, f"nothing billed to an API key, {cheapest['median_minutes']} minutes a task")
+    steadiest = min(reliable, key=lambda s: (s["median_passes"] if s["median_passes"] is not None else 99,
+                                             s["median_minutes"]))
+    add("the steadiest", steadiest, f"usually {steadiest['median_passes']:g} pass(es), so it rarely goes round again")
+    avoid = [s for s in summary.values() if s["works"] < s["runs"]]
+    return picks + [{"for": "avoid", "combo": s["combo"], "roles": roles.get(s["combo"], {}),
+                     "works": f"{s['works']}/{s['runs']}",
+                     "why": ("no run finished" if not s["works"] else "a run did not finish"),
+                     "minutes": s["median_minutes"], "billed_per_run": 0} for s in avoid]
+
+
 def load_results(folder):
     rows = []
     for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:

@@ -25,6 +25,7 @@
     mp-agent queue add [start flags] "task" | list | remove ID | run-next   jobs that run one after another
     mp-agent history [--json]            where the time and money went, and which judges object
     mp-agent bench [--list] [--task T] [--combo "worker=X,judge=Y"] [--repeat N]   compare model line-ups
+    mp-agent bench table | suggest       the last comparison's table, or what it recommends
     mp-agent tidy [--yes] [--all-runs]   clear mp-agent's own leftovers (never your projects or branches)
     mp-agent config --preset P | --planner|--worker|--reviewer|--panel-model|--judge NAME | --max-usd N
                     | --claude-billing subscription|api   change the defaults
@@ -231,6 +232,11 @@ def list_models(argv):
     for preset in found:
         mark = "*" if extra.get("preset") == preset["id"] else " "
         print(f" {mark} {preset['id']:8} {preset['name']}: {preset['about']}")
+        if preset.get("measured"):
+            m = preset["measured"]
+            money = f", ${m['billed_per_run']:.2f} a task billed" if m["billed_per_run"] else ", no API bills"
+            print(f"            measured {models.MEASURED_ON}: worked {m['works']}/{m['runs']}, "
+                  f"{m['minutes']:g} min a task, {m['passes']:g} passes{money}")
         print("            " + (roles_line(preset["roles"], options) if preset["roles"]
                                  else "needs " + " and ".join(preset["missing"])))
     print("\navailable (any can take any role; the planner and judge must differ from the workers):")
@@ -581,6 +587,25 @@ SELFTEST_TASK = "Fix add() in calc.py so python3 test_calc.py prints ok"
 def bench(argv):
     """Compare model line-ups on the same bench tasks, graded by tests the agents never see."""
     from . import bench as benchmark
+    if argv and argv[0] == "suggest":
+        folder = argv[1] if len(argv) > 1 else newest_bench()
+        if not folder:
+            print("NEEDS: no bench results yet; run: mp-agent bench --preset fast", file=sys.stderr)
+            return 3
+        picks = benchmark.suggest(benchmark.load_results(folder))
+        if not picks:
+            print("no line-up finished a run in these results")
+            return 0
+        print(f"from {os.path.basename(folder)}:\n")
+        for pick in picks:
+            roles = " ".join(f"--{r if r != 'panel' else 'panel-model'} {spec}" for r, spec in sorted(pick["roles"].items()))
+            if pick["for"] == "avoid":
+                print(f"  avoid {pick['combo']}: worked {pick['works']} ({pick['why']})")
+                continue
+            money = f", ${pick['billed_per_run']:.2f} a task billed" if pick["billed_per_run"] else ", no API bills"
+            print(f"  for {pick['for']}: {pick['combo']} — {pick['why']}{money}")
+            print(f"      mp-agent config {roles}")
+        return 0
     if argv and argv[0] == "table":
         folder = argv[1] if len(argv) > 1 else newest_bench()
         if not folder:

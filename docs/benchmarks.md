@@ -107,6 +107,25 @@ good the model is.
 - GPT-6-Astra was not measured: it is the strongest model on the ChatGPT plan, and worth
   keeping for the planner and judge rather than spending on the building.
 
+## Turning results into a choice
+
+`mp-agent bench suggest` reads the last results and says which line-up to use for the thing
+you actually want, with the command to set it:
+
+```
+for the quickest: fast-preset — 5.8 minutes a task, and it worked every time, $0.04 a task billed
+    mp-agent config --judge claude:sonnet --planner claude:sonnet --worker cline:inception:mercury-2.5
+for no API bills: sonnet-builds — nothing billed to an API key, 8.7 minutes a task
+    mp-agent config --judge claude:opus --planner claude:opus --worker claude:sonnet
+avoid haiku-builds: worked 3/4 (a run did not finish)
+```
+
+A line-up that never finished a run recommends nothing, however fast its failures were.
+
+The ready-made presets carry their own measured numbers, in `mp-agent models` and in the
+workshop's MODELS screen, so you can see what a team did before you pick it. `mixed` has no
+numbers: it was never run exactly as that preset builds it.
+
 ## Running it yourself
 
 ```bash

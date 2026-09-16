@@ -1737,6 +1737,11 @@ function renderSetup() {
       line.append(use, " ");
     }
     line.append(el("b", { text: p.name }), el("small", { text: p.about }));
+    if (p.measured) {
+      const m = p.measured;
+      line.append(el("small", { class: "measured", text: `measured ${p.measured_on}: worked ${m.works}/${m.runs}, `
+        + `${m.minutes} min a task, ${m.passes} passes, ` + (m.billed_per_run ? `$${m.billed_per_run.toFixed(2)} a task billed` : "no API bills") }));
+    }
     if (p.roles) line.append(el("small", { text: ["planner", "worker", "reviewer", "panel", "judge"].map((r) => `${r} ${p.roles[r] || "same as workers"}`).join(" · ") }));
     else line.append(el("small", { text: "needs " + p.missing.join(" and ") }));
     presets.append(line);
@@ -1963,7 +1968,8 @@ function fillPresets() {
 }
 function showPreset() {
   const p = (modelInfo.presets || []).find((x) => x.id === $("set-preset").value);
-  $("presetAbout").textContent = p ? `${p.about} Panel of ${p.tuning.panel_size}.` : "pick a ready-made team, or choose each role below";
+  const measured = p && p.measured ? ` Measured ${p.measured_on}: worked ${p.measured.works}/${p.measured.runs}, ${p.measured.minutes} min a task.` : "";
+  $("presetAbout").textContent = p ? `${p.about} Panel of ${p.tuning.panel_size}.${measured}` : "pick a ready-made team, or choose each role below";
 }
 $("set-preset").addEventListener("change", () => {
   const p = (modelInfo.presets || []).find((x) => x.id === $("set-preset").value);

@@ -36,6 +36,10 @@ BUILTIN = {"worker": "cline:inception:mercury-2.5", "planner": "claude:sonnet", 
            "reviewer": SAME, "panel": SAME}
 TUNING = {"panel_size": 3, "patience": 3, "churn": 8}
 
+# What each line-up actually did, measured the same way: docs/benchmarks.md. Only line-ups that
+# were run exactly as the preset builds them carry a "measured" note; "mixed" was not.
+MEASURED_ON = "16 Sep 2026"
+
 PRESETS = [
     {"id": "fast", "name": "Fast and cheap",
      "about": "A fast, cheap model does the work many times over and reviews itself with fresh eyes; Claude plans "
@@ -43,6 +47,7 @@ PRESETS = [
               "bills an API key.",
      "roles": {"worker": ["cline:*:mercury*", "opencode:*mercury*"], "planner": ["claude:sonnet", "codex:*"],
                "judge": ["claude:sonnet", "claude:opus", "codex:*"]},
+     "measured": {"runs": 6, "works": 6, "minutes": 6.9, "passes": 2.5, "billed_per_run": 0.16},
      "tuning": {"panel_size": 3, "patience": 3, "churn": 8}},
     {"id": "claude", "name": "All Claude",
      "about": "Everything on a Claude subscription: Opus plans and judges, Sonnet builds and reviews itself with "
@@ -51,12 +56,14 @@ PRESETS = [
      # model to spend a whole budget producing nothing, so this preset keeps the reviewing at Sonnet's level.
      "roles": {"planner": ["claude:opus"], "worker": ["claude:sonnet"], "judge": ["claude:opus"],
                "reviewer": ["claude:sonnet"], "panel": ["claude:sonnet"]},
+     "measured": {"runs": 6, "works": 6, "minutes": 8.6, "passes": 1.0, "billed_per_run": 0.0},
      "tuning": {"panel_size": 1, "patience": 2, "churn": 5}},
     {"id": "openai", "name": "All OpenAI",
      "about": "Everything on a ChatGPT plan through Codex: a fast GPT builds, a stronger one plans and judges. "
               "Measured at 10.2 minutes a task, with more passes than Claude needs.",
      "roles": {"worker": ["codex:*luna*", "codex:*mini*", "codex:*"], "planner": ["codex:*sol*", "codex:*"],
                "judge": ["codex:*sol*", "codex:*terra*", "codex:*"]},
+     "measured": {"runs": 6, "works": 5, "minutes": 10.2, "passes": 3.0, "billed_per_run": 0.0},
      "tuning": {"panel_size": 1, "patience": 2, "churn": 5}},
     {"id": "mixed", "name": "Claude plans, GPT builds",
      "about": "Opus plans and judges, a fast GPT does the work, Sonnet reviews: two companies' models checking each "
@@ -204,7 +211,8 @@ def presets(options):
     for preset in PRESETS:
         roles, missing = resolve_preset(preset, options)
         out.append({"id": preset["id"], "name": preset["name"], "about": preset["about"],
-                    "tuning": dict(preset["tuning"]), "roles": roles, "missing": missing})
+                    "tuning": dict(preset["tuning"]), "roles": roles, "missing": missing,
+                    "measured": dict(preset.get("measured") or {}) or None, "measured_on": MEASURED_ON})
     return out
 
 
