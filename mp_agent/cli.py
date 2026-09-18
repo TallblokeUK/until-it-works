@@ -10,6 +10,7 @@
     mp-agent discard [--run DIR]         delete a finished run's branch
     mp-agent selftest                    check everything works end to end (~2 minutes)
     mp-agent resume [--run DIR]          carry on a stopped or crashed run where it left off
+    mp-agent again [--run DIR] [--same-models]   do a finished run's task again
     mp-agent setup [--json]              what is installed and set up, API keys, presets you can use
     mp-agent keys list | set P | remove P   API keys, kept in the system keychain
     mp-agent test MODEL [--json]         one tiny call, to check a model works
@@ -27,7 +28,7 @@
     mp-agent bench [--list] [--task T] [--combo "worker=X,judge=Y"] [--repeat N]   compare model line-ups
     mp-agent bench table | suggest       the last comparison's table, or what it recommends
     mp-agent tidy [--yes] [--all-runs]   clear mp-agent's own leftovers (never your projects or branches)
-    mp-agent config --preset P | --planner|--worker|--reviewer|--panel-model|--judge NAME | --max-usd N
+    mp-agent config [--project [PATH]] --preset P | --planner|--worker|--judge NAME | --max-usd N
                     | --claude-billing subscription|api   change the defaults
 """
 import argparse
@@ -137,6 +138,9 @@ def parser():
     shape.add_argument("--swarm", dest="shape", action="store_const", const="swarm",
                        help="split the task into parts built in parallel (default: the planner decides)")
     p.add_argument("--no-ask", action="store_true", help="never wait for you; stop NOT approved instead")
+    p.add_argument("--unattended", choices=("switch", "stop"), default=None,
+                   help="with --no-ask, when a model cannot be used at all: switch to another and carry on "
+                        "(default), or stop")
 
     p.add_argument("--timeout", type=int, default=env("MP_TIMEOUT", 900, int), help="per call, seconds")
     p.add_argument("--min-interval", type=float, default=env("MP_MIN_INTERVAL", 3.0, float),
@@ -183,12 +187,12 @@ def installed_models():
                             claude_billing=models.load_extra(STATE).get("claude_billing") or "subscription")
 
 
-def choose_models(given=None, options=None):
+def choose_models(given=None, options=None, project=None):
     """Chosen names (flags or config) → specs, checked. Returns (choices, options, problem).
-    given: {role: name} from flags; a missing role comes from the config. For the
-    reviewer and panel, "same" (or nothing) means the workers' model."""
+    given: {role: name} from flags; then the project's own roles, if it has any; then the
+    general config. For the reviewer and panel, "same" (or nothing) means the workers' model."""
     given = given or {}
-    config = models.load_config(STATE)
+    config = {**models.load_config(STATE), **models.project_config(STATE, project)}
     options = options if options is not None else installed_models()
     choices = {}
     try:
@@ -251,6 +255,11 @@ def set_config(argv):
     add_role_flags(p)
     p.add_argument("--preset", help="choose every role and the loop settings from a preset (see mp-agent models)")
     p.add_argument("--max-usd", type=float, help="default spending cap per job in dollars (0 = none)")
+    p.add_argument("--unattended", choices=("switch", "stop"),
+                   help="jobs with nobody watching: switch to another model when one cannot be used, or stop")
+    p.add_argument("--project", nargs="?", const=".",
+                   help="set these models for one project only (default: this folder); "
+                        "--project PATH --preset none forgets them")
     p.add_argument("--when-stuck", choices=("ask", "auto", "never"),
                    help="when the workers get stuck: offer a stronger model (ask), switch automatically (auto), or never")
     p.add_argument("--upgrade-to", help="with --when-stuck auto: the model to switch to (default: the strongest available)")
@@ -258,6 +267,10 @@ def set_config(argv):
     p.add_argument("--claude-billing", choices=("subscription", "api"),
                    help="how Claude Code is paid for: your Claude login (default) or your stored Anthropic API key")
     args = p.parse_args(argv)
+    if args.unattended:
+        models.save_extra(STATE, {"unattended": args.unattended})
+        print("jobs with nobody watching: " + ("switch to another model when one cannot be used"
+                                               if args.unattended == "switch" else "stop"))
     if args.when_stuck or args.upgrade_to is not None or args.max_upgrades is not None:
         current = models.load_upgrade(STATE)
         if args.when_stuck:
@@ -279,6 +292,8 @@ def set_config(argv):
         models.save_extra(STATE, {"max_usd": max(0.0, args.max_usd)})
         print(f"max_usd   {max(0.0, args.max_usd):g}" + (" (no cap)" if not args.max_usd else ""))
     options = installed_models()
+    if args.project:
+        return set_project_config(args, options)
     if args.preset:
         chosen, problem = models.apply_preset(STATE, args.preset, options)
         if problem:
@@ -299,6 +314,42 @@ def set_config(argv):
     models.save_extra(STATE, {"preset": None})      # hand-picked now
     for role in models.ROLES:
         print(f"{role:9} {saved[role] or 'same as the workers'}")
+    return 0
+
+
+def set_project_config(args, options):
+    """One project's own models: what a job started there uses unless it is told otherwise."""
+    project = gitops.toplevel(os.path.abspath(os.path.expanduser(args.project))) or \
+        os.path.abspath(os.path.expanduser(args.project))
+    if not os.path.isdir(project):
+        print(f"not changed: there is no folder {project}", file=sys.stderr)
+        return 1
+    if (args.preset or "").lower() in ("none", "off", "forget"):
+        models.save_project_config(STATE, project, {})
+        print(f"{project}: back to your usual models")
+        return 0
+    given = given_roles(args)
+    if args.preset:
+        preset = next((p for p in models.presets(options) if p["id"] == args.preset), None)
+        if preset is None or not preset["roles"]:
+            problem = f"no preset called '{args.preset}'" if preset is None else \
+                f"the {preset['name']} preset needs " + " and ".join(preset["missing"])
+            print(f"not changed: {problem}", file=sys.stderr)
+            return 1
+        given = {role: spec for role, spec in preset["roles"].items() if spec}
+    if not given:
+        kept = models.project_config(STATE, project)
+        print(f"{project}: " + (", ".join(f"{r} {s}" for r, s in sorted(kept.items())) if kept
+                                else "no models of its own; it uses your usual ones"))
+        return 0
+    choices, _, problem = choose_models(given, options)
+    if problem:
+        print(f"not changed: {problem}", file=sys.stderr)
+        return 1
+    kept = models.save_project_config(STATE, project, {r: choices[r] for r in given})
+    print(f"{project}: " + ", ".join(f"{r} {s}" for r, s in sorted(kept.items())))
+    print("jobs started here use these unless the job says otherwise; forget them with: "
+          f"mp-agent config --project {project} --preset none")
     return 0
 
 
@@ -375,7 +426,9 @@ def start(argv):
     if not task:
         print("NEEDS: a task to do. Say what you want built or fixed.")
         return 3
-    choices, options, problem = choose_models(given_roles(args))
+    # a project with its own models is honoured here too, so what is printed is what runs
+    here = args.repo or (None if (args.github or args.new or args.oneoff) else os.getcwd())
+    choices, options, problem = choose_models(given_roles(args), project=here)
     if problem:
         print(f"NEEDS: {problem}")
         return 3
@@ -490,6 +543,48 @@ def resumable(run_dir):
         if meta.get("resumed_as"):
             return f"it was already resumed as {os.path.basename(meta['resumed_as'])}"
     return None
+
+
+def again(argv):
+    """Start a finished run's task again, in the same project, with the same models unless told otherwise."""
+    p = argparse.ArgumentParser(prog="mp-agent again", description=again.__doc__)
+    p.add_argument("--run", help="run folder (default: the most recent finished run)")
+    add_role_flags(p)
+    p.add_argument("--same-models", action="store_true", help="use the models that run used, not your current ones")
+    args, passthrough = p.parse_known_args(argv)
+    target = args.run
+    if not target:
+        for name in sorted(os.listdir(RUNS), reverse=True) if os.path.isdir(RUNS) else []:
+            if os.path.exists(os.path.join(RUNS, name, "metadata.json")):
+                target = os.path.join(RUNS, name)
+                break
+    if not target or not os.path.isdir(target):
+        print("NEEDS: no finished run to repeat", file=sys.stderr)
+        return 3
+    try:
+        with open(os.path.join(target, "metadata.json")) as fh:
+            meta = json.load(fh)
+        task = open(os.path.join(target, "task.md")).read().strip()
+    except (OSError, ValueError):
+        print(f"NEEDS: {os.path.basename(target)} cannot be read", file=sys.stderr)
+        return 3
+    project = meta.get("project") or ""
+    if not os.path.isdir(project):
+        print(f"NEEDS: {project or 'that project'} is not here any more", file=sys.stderr)
+        return 3
+    flags = ["--repo", project]
+    if args.same_models and not given_roles(args):
+        try:
+            with open(os.path.join(target, "roles.json")) as fh:
+                for role, spec in json.load(fh).items():
+                    if role in models.ROLES and spec:
+                        flags += ["--panel-model" if role == "panel" else f"--{role}", str(spec)]
+        except (OSError, ValueError):
+            pass
+    chosen = given_roles(args)
+    if chosen:
+        flags += role_args(chosen)
+    return start([*flags, *passthrough, task])
 
 
 def resume(argv):
@@ -1154,6 +1249,8 @@ def main(argv):
         return bench(argv[1:])
     if argv and argv[0] == "selftest":
         return selftest(argv[1:])
+    if argv and argv[0] == "again":
+        return again(argv[1:])
     if argv and argv[0] == "resume":
         return resume(argv[1:])
     if argv and argv[0] == "models":
@@ -1207,7 +1304,7 @@ def main(argv):
         except gitops.SetupError as exc:
             print(exc, file=sys.stderr)
             return 2
-    choices, _, problem = choose_models(given_roles(args))
+    choices, _, problem = choose_models(given_roles(args), project=repo)
     if problem:
         print(problem, file=sys.stderr)
         return 2
@@ -1260,6 +1357,7 @@ def main(argv):
     options = Options(workers=args.workers, patience=args.patience, churn=args.churn, panel_size=args.panel,
                       review=not args.no_critic, audit=not args.no_audit, ask=not args.no_ask, keep=args.keep,
                       budget_minutes=args.budget, max_calls=args.max_calls, shape=args.shape or "auto",
+                      unattended=args.unattended or models.load_unattended(STATE),
                       max_usd=args.max_usd if args.max_usd is not None else float(models.load_extra(STATE).get("max_usd") or 0))
     decisions = Decisions(save=lambda items: run.write_json("decisions.json", items))
     if resume_info:

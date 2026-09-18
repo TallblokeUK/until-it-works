@@ -42,8 +42,14 @@ escalates when it stops:
 - **ask**: the run pauses, sends a desktop notification, shows the question in
   `mp-status` and the workshop, and waits for `mp-agent answer "…"`
 
-When a model can't be used at all (out of credit, out of plan usage, or a free
-tier used up), the question offers **SWITCH TO** buttons next to retry and stop.
+**With nobody watching** (a queued job, an overnight run, `--no-ask`), a model that
+cannot be used no longer ends the job: it switches to another one on a different
+account and carries on, saying so in the log and recording it in the run. Set
+`mp-agent config --unattended stop` to have it stop instead. The bench always
+stops, because a line-up that quietly became a different one would measure nothing.
+
+When someone is there and a model can't be used at all (out of credit, out of plan
+usage, or a free tier used up), the question offers **SWITCH TO** buttons next to retry and stop.
 They list models on a different account, as close in strength as possible. The
 switch covers every role that model was playing (workers, quick reviewer, panel)
 for the rest of the job. It never picks the judge's or planner's model for the

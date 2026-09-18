@@ -779,6 +779,39 @@ class OutOfCredit(unittest.TestCase):
         self.assertEqual(result.get("switches", [{}])[0].get("to"), "codex:gpt-5.6-luna")
 
 
+class Unattended(unittest.TestCase):
+    def broken(self):
+        return Reply("ERROR: You've hit your usage limit. Purchase more credits.", 1, 0.01)
+
+    def setup(self, unattended):
+        repo = make_repo({"README": "x"})
+        first = Script("mercury", implement=lambda p, cwd: self.broken())
+        fresh = Script("luna", implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done", review=approve,
+                       panel=approve)
+        ctx = context(first, Script("sonnet", audit=approve), Script(plan=lambda *a: plan_reply(single())),
+                      reviewer=fresh, panel=fresh, ask=False, unattended=unattended)
+        ctx.roles = {"worker": "cline:inception:mercury-2.5", "reviewer": None, "panel": None,
+                     "planner": "claude:sonnet", "judge": "claude:sonnet"}
+        ctx.model_options = [{"spec": s, "label": s} for s in ("claude:sonnet", "codex:gpt-5.6-luna")]
+        ctx.make_worker = ctx.make_agent = lambda spec: fresh
+        return repo, ctx
+
+    def test_nobody_watching_switches_models_and_carries_on(self):
+        repo, ctx = self.setup("switch")
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("nobody is watching, so carrying on with another model", log(ctx))
+        self.assertEqual(ctx.roles["worker"], "codex:gpt-5.6-luna")
+        self.assertEqual(result["switches"][0]["to"], "codex:gpt-5.6-luna")
+
+    def test_it_can_be_told_to_stop_instead(self):
+        repo, ctx = self.setup("stop")
+        result = orchestrate(ctx, repo)
+        self.assertFalse(result["approved"])
+        self.assertIn("unavailable", result["outcome"])
+        self.assertEqual(ctx.switches, [])
+
+
 class WaveZero(unittest.TestCase):
     def test_tests_written_first_then_frozen(self):
         repo = make_repo()

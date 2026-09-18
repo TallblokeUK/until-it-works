@@ -101,6 +101,34 @@ def load_config(state_dir):
     return {role: str(data[role] if role in data and data[role] is not None else BUILTIN[role]) for role in ROLES}
 
 
+def project_config(state_dir, project):
+    """The roles this project always uses, if it has its own. A project's choice beats the
+    general one and is beaten by what a job is started with."""
+    if not project:
+        return {}
+    saved = (_load(state_dir).get("project_roles") or {}).get(os.path.realpath(os.path.expanduser(project)))
+    return {role: str(spec) for role, spec in (saved or {}).items() if role in ROLES}
+
+
+def save_project_config(state_dir, project, choices):
+    """Keep (or, with choices None or empty, forget) one project's own roles."""
+    data = _load(state_dir)
+    projects = dict(data.get("project_roles") or {})
+    key = os.path.realpath(os.path.expanduser(project))
+    kept = {role: spec for role, spec in (choices or {}).items() if role in ROLES and spec}
+    if kept:
+        projects[key] = kept
+    else:
+        projects.pop(key, None)
+    data["project_roles"] = projects
+    _save(state_dir, data)
+    return kept
+
+
+def projects_with_roles(state_dir):
+    return dict(_load(state_dir).get("project_roles") or {})
+
+
 def effective(choices):
     """Every role with a real spec: an empty reviewer or panel means the workers' model."""
     return {role: (choices.get(role) or choices.get("worker")) for role in ROLES}
@@ -179,6 +207,13 @@ def load_upgrade(state_dir):
     saved = _load(state_dir).get("upgrade") or {}
     mode = saved.get("mode") if saved.get("mode") in ("ask", "auto", "never") else "ask"
     return {"mode": mode, "to": str(saved.get("to") or ""), "max": max(0, int(saved.get("max", 1) or 0))}
+
+
+def load_unattended(state_dir):
+    """What a job with nobody watching does when a model cannot be used at all:
+    "switch" to another one and carry on, or "stop"."""
+    mode = _load(state_dir).get("unattended")
+    return mode if mode in ("switch", "stop") else "switch"
 
 
 def resolve_preset(preset, options):

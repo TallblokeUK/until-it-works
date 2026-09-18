@@ -217,6 +217,7 @@
   .answer input{flex:1;min-width:0;font:inherit;font-size:22px;background:#0d0b1e;color:#fff;border:2px solid var(--gold);padding:6px 10px}
   .answer button{font-family:var(--pixel);font-size:10px;background:var(--gold);color:#141024;border:0;padding:8px 12px;cursor:pointer}
   .answer button.quick{background:#2d2757;color:var(--gold);border:2px solid var(--gold)}
+  button.again{background:#2d2757;color:var(--gold);border:2px solid var(--gold);font-size:12px;padding:2px 6px;cursor:pointer}
   .result{margin-top:16px;border:3px solid var(--green);background:#0e2a18;padding:12px 14px}
   .result.bad{border-color:var(--red);background:#2a0e12}
   .result .q{font-size:24px;color:#fff;margin:4px 0 8px;overflow-wrap:anywhere}
@@ -386,6 +387,17 @@
     <div class="answer"><button type="button" class="quick" id="repoRefresh">LOOK AGAIN</button>
       <button type="button" class="quick" data-close="repoPanel">CLOSE</button></div>
     <div class="how" id="repoStatus">Nothing here fetches, pushes or changes anything.</div>
+  </div>
+
+  <div class="settings" id="teamPanel" hidden>
+    <div class="label">THIS PROJECT'S TEAM <span class="dim" id="teamProject"></span></div>
+    <div class="how">Which models jobs started in this project use. A job's own choices still win, and without
+      one of its own a project uses your usual team.</div>
+    <label>Team<select id="teamPreset"></select></label>
+    <div id="teamNow" class="how"></div>
+    <div class="answer"><button type="button" id="teamSave">SAVE FOR THIS PROJECT</button>
+      <button type="button" class="quick" data-close="teamPanel">CLOSE</button></div>
+    <div class="how" id="teamStatus"></div>
   </div>
 
   <div class="settings" id="rulesPanel" hidden>
@@ -1413,7 +1425,7 @@ $("resumeBtn").addEventListener("click", async () => {
 });
 $("discardBtn").addEventListener("click", () => act("discard"));
 // ---- overlays over the scene: only one open at a time
-const OVERLAYS = ["jobForm", "settings", "changesPanel", "queuePanel", "historyPanel", "memoryPanel", "tidyPanel", "setupPanel", "rulesPanel", "folderPanel", "repoPanel"];
+const OVERLAYS = ["jobForm", "settings", "changesPanel", "queuePanel", "historyPanel", "memoryPanel", "tidyPanel", "setupPanel", "rulesPanel", "teamPanel", "folderPanel", "repoPanel"];
 function openOverlay(id) { for (const o of OVERLAYS) $(o).hidden = o !== id; }
 for (const b of document.querySelectorAll("[data-close]")) b.addEventListener("click", () => { $(b.dataset.close).hidden = true; });
 const postJSON = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -1522,12 +1534,23 @@ $("openHistory").addEventListener("click", async () => {
       bar("panel objections", g.panel_objections, Object.entries(h.lenses).map(([k, v]) => `${k} ${v}`).join(" · ")) +
       bar("judge objections", g.judge_objections, `${g.judge_after_panel} after the panel had approved (what the panel missed)`) +
       bar("rulings", g.rulings) + bar("questions for you", g.questions);
-    $("historyRuns").innerHTML = "<tr><th>when</th><th>project</th><th>task</th><th>result</th><th>passes</th><th>min</th><th>$</th></tr>" +
+    $("historyRuns").innerHTML = "<tr><th>when</th><th>project</th><th>task</th><th>result</th><th>passes</th><th>min</th><th>$</th><th></th></tr>" +
       h.runs.slice(0, 40).map((r) => `<tr data-run="${esc(r.run)}"><td>${esc(r.run.slice(4, 6))}/${esc(r.run.slice(6, 8))} ${esc(r.run.slice(9, 11))}:${esc(r.run.slice(11, 13))}</td><td>${esc(r.project)}</td>` +
         `<td>${esc(r.task)}</td><td>${r.approved ? "approved" : "stopped"}${r.resolution ? " · " + esc(r.resolution) : ""}${(r.upgrades || []).length ? " · upgraded " + esc(r.upgrades.join(", ")) : ""}${(r.switches || []).length ? " · switched " + esc(r.switches.join(", ")) : ""}</td>` +
-        `<td>${r.passes}</td><td>${Math.round(r.seconds / 60)}</td><td>${r.billed_usd.toFixed(3)}</td></tr>`).join("");
+        `<td>${r.passes}</td><td>${Math.round(r.seconds / 60)}</td><td>${r.billed_usd.toFixed(3)}</td>` +
+        `<td><button type="button" class="quick again" data-again="${esc(r.run)}" title="do this task again, in the same project">AGAIN</button></td></tr>`).join("");
     for (const tr of $("historyRuns").querySelectorAll("tr[data-run]"))
-      tr.onclick = () => { selectedRun = tr.dataset.run; $("historyPanel").hidden = true; refreshTabs(); };
+      tr.onclick = (e) => {
+        if (e.target.dataset.again) return;
+        selectedRun = tr.dataset.run; $("historyPanel").hidden = true; refreshTabs();
+      };
+    for (const b of $("historyRuns").querySelectorAll("button[data-again]"))
+      b.onclick = async () => {
+        b.disabled = true; b.textContent = "STARTING…";
+        const res = await postJSON("api/again", { run: b.dataset.again });
+        if (res.ok) { $("historyPanel").hidden = true; selectedRun = null; refreshTabs(); }
+        else { b.disabled = false; b.textContent = "AGAIN"; $("historyTotals").textContent = "not started: " + await res.text(); }
+      };
   } catch (e) { $("historyTotals").textContent = "could not load: the visualizer server is not running"; }
 });
 
@@ -2069,10 +2092,39 @@ function renderProjects() {
   bar.append(name, path, count);
   if (p.to_decide) bar.append(button(`${p.to_decide} WAITING FOR KEEP OR DISCARD`, showFirstToDecide, true));
   bar.append(button("NEW JOB HERE", () => $("openJob").click()), button("REPO", () => openRepo(p)), button("RULES", () => openRules(p)),
+             button("TEAM", () => openTeam(p)),
              button("MEMORY", () => $("openMemory").click()),
              button("OPEN FOLDER", () => postJSON("api/open-folder", { project: p.path })),
              button("ALL PROJECTS", () => chooseProject(null)));
 }
+async function openTeam(p) {
+  openOverlay("teamPanel");
+  $("teamProject").textContent = p.name;
+  $("teamStatus").textContent = "";
+  $("teamNow").textContent = "looking…";
+  let info;
+  try {
+    const res = await fetch("api/team?project=" + encodeURIComponent(p.path), { cache: "no-store" });
+    if (!res.ok) { $("teamNow").textContent = await res.text(); return; }
+    info = await res.json();
+  } catch (e) { $("teamNow").textContent = "could not look: the visualizer server is not running"; return; }
+  const sel = $("teamPreset"); sel.innerHTML = "";
+  const add = (v, t, off) => { const o = document.createElement("option"); o.value = v; o.textContent = t; o.disabled = !!off; sel.append(o); };
+  add("none", "my usual team");
+  for (const preset of info.presets) add(preset.id, preset.roles ? preset.name : `${preset.name} (not available here)`, !preset.roles);
+  const roles = info.roles || {};
+  const mine = Object.keys(roles).length;
+  sel.value = mine ? (info.presets.find((x) => x.roles && ROLE_NAMES.every((r) => (x.roles[r] || "") === (roles[r] || "")))?.id || "none") : "none";
+  $("teamNow").textContent = mine
+    ? "This project uses: " + ROLE_NAMES.map((r) => `${r} ${roles[r] || "same as the workers"}`).join(" · ")
+    : "This project has no team of its own: jobs here use " + ROLE_NAMES.map((r) => `${r} ${info.usual[r] || "same as the workers"}`).join(" · ");
+  $("teamSave").onclick = async () => {
+    const res = await postJSON("api/team", { project: p.path, preset: sel.value });
+    $("teamStatus").textContent = res.ok ? (await res.json()).detail : "not changed: " + await res.text();
+    if (res.ok) openTeam(p);
+  };
+}
+
 async function openRules(p) {
   openOverlay("rulesPanel");
   $("rulesProject").textContent = p.name;

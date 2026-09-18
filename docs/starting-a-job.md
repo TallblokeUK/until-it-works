@@ -102,6 +102,15 @@ job has run in yet. Git projects are marked.
 
 REPO only looks. It never fetches, pushes or changes anything.
 
+**TEAM** in the project bar sets the models this project uses. A job started here uses
+them unless the job says otherwise, and a project without its own team uses your usual
+one. From a terminal: `mp-agent config --project . --preset claude`, and
+`--preset none` to forget it.
+
+**AGAIN** beside a run in HISTORY does that run's task again, in the same project
+(`mp-agent again --run DIR`, with `--same-models` to use the models that run used rather
+than your current ones).
+
 **RULES** in the project bar shows the project's own instructions for AI agents
 (CLAUDE.md, AGENTS.md, rules.md, Cursor and Cline rules). Every role in a job
 gets the same copy, whatever tool it runs on, and reviewers can hold the work

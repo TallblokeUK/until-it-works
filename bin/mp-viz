@@ -169,6 +169,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                   timeout=60)
             return self.reply(200 if proc.returncode == 0 else 500, "application/json",
                               (proc.stdout or json.dumps({"error": proc.stderr})).encode())
+        if path == "/api/again":
+            run = str(self.body().get("run") or "")
+            if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
+                return self.reply(400, "text/plain", b"which run?")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            args = [sys.executable, entry, "again", "--run", os.path.join(RUNS, run)]
+            if self.body().get("same_models"):
+                args.append("--same-models")
+            proc = subprocess.run(args, capture_output=True, text=True, cwd=HOME, timeout=900)
+            out = (proc.stdout + proc.stderr).strip()
+            ok = proc.returncode == 0 and "Started:" in out
+            return self.reply(200 if ok else 409, "application/json" if ok else "text/plain",
+                              json.dumps({"detail": out}).encode() if ok else out.replace("NEEDS: ", "").encode())
         if path == "/api/tidy":
             return self.reply(200, "application/json", json.dumps(tidy.plan(STATE)).encode())
         if path == "/api/queue":
@@ -186,6 +199,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                   timeout=30)
             return self.reply(200 if proc.returncode == 0 else 500, "application/json",
                               (proc.stdout or json.dumps({"error": proc.stderr[-300:]})).encode())
+        if path == "/api/team":
+            wanted = query("project") or ""
+            known = [p["path"] for p in projects.list_projects(RUNS, alive, projects.opened(STATE))]
+            if not any(projects.same(p, wanted) for p in known):
+                return self.reply(404, "text/plain", b"not a project the workshop knows")
+            from mp_agent import models as m
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            proc = subprocess.run([sys.executable, entry, "models", "--json"], capture_output=True, text=True,
+                                  timeout=60)
+            try:
+                listed = json.loads(proc.stdout or "{}").get("presets") or []
+            except ValueError:
+                listed = []
+            return self.reply(200, "application/json", json.dumps({
+                "project": wanted, "roles": m.project_config(STATE, wanted), "usual": m.load_config(STATE),
+                "presets": [{"id": p["id"], "name": p["name"], "roles": p.get("roles"),
+                             "measured": p.get("measured")} for p in listed]}).encode())
         if path == "/api/repo":
             wanted = query("project") or ""
             known = [p["path"] for p in projects.list_projects(RUNS, alive, projects.opened(STATE))]
@@ -329,6 +359,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok = proc.returncode == 0 and "Started:" in out
             return self.reply(200 if ok else 409, "application/json" if ok else "text/plain",
                               json.dumps({"detail": out}).encode() if ok else out.replace("NEEDS: ", "").encode())
+        if path == "/api/again":
+            run = str(self.body().get("run") or "")
+            if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
+                return self.reply(400, "text/plain", b"which run?")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            args = [sys.executable, entry, "again", "--run", os.path.join(RUNS, run)]
+            if self.body().get("same_models"):
+                args.append("--same-models")
+            proc = subprocess.run(args, capture_output=True, text=True, cwd=HOME, timeout=900)
+            out = (proc.stdout + proc.stderr).strip()
+            ok = proc.returncode == 0 and "Started:" in out
+            return self.reply(200 if ok else 409, "application/json" if ok else "text/plain",
+                              json.dumps({"detail": out}).encode() if ok else out.replace("NEEDS: ", "").encode())
         if path == "/api/tidy":
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
@@ -436,6 +479,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if proc.returncode != 0:
                 return self.reply(409, "text/plain", (proc.stderr or proc.stdout).strip().encode())
             return self.reply(200, "application/json", json.dumps({"detail": proc.stdout.strip().splitlines()[0]}).encode())
+        if path == "/api/team":
+            body = self.body()
+            wanted, preset = str(body.get("project") or ""), str(body.get("preset") or "")
+            known = [p["path"] for p in projects.list_projects(RUNS, alive, projects.opened(STATE))]
+            if not any(projects.same(p, wanted) for p in known):
+                return self.reply(404, "text/plain", b"not a project the workshop knows")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            proc = subprocess.run([sys.executable, entry, "config", "--project", wanted, "--preset",
+                                   preset or "none"], capture_output=True, text=True, timeout=60)
+            out = (proc.stdout + proc.stderr).strip()
+            return self.reply(200 if proc.returncode == 0 else 400, "application/json" if proc.returncode == 0
+                              else "text/plain", json.dumps({"detail": out}).encode() if proc.returncode == 0
+                              else out.encode())
         if path == "/api/projects/open":
             try:
                 wanted = os.path.realpath(os.path.expanduser(str(self.body().get("path") or "")))

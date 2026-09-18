@@ -129,15 +129,42 @@ def grade(project, branch, hidden, timeout=300):
     return result
 
 
-def run_one(task, combo, folder, runs_dir, entry, budget=45, max_calls=250, timeout=5400, say=print):
-    """One job, start to graded. Returns the row for the results file."""
+# A run the provider would not serve measures nothing about the models. These are its words,
+# in the outcome line, when it gave up: the run is void and worth trying again.
+PROVIDER_GAVE_UP = ("was unavailable", "could not run", "failed 3 times in a row", "at capacity",
+                    "quota", "usage limit")
+
+
+def is_void(row):
+    """True when the run ended for the provider's reasons, not the models'."""
+    text = ((row.get("outcome") or "") + " " + str(row.get("error") or "")).lower()
+    return not row.get("works") and any(phrase in text for phrase in PROVIDER_GAVE_UP)
+
+
+def run_one(task, combo, folder, runs_dir, entry, budget=45, max_calls=250, timeout=5400, say=print, tries=2):
+    """One job, start to graded. A run the provider would not serve is tried again, then marked void."""
+    for attempt in range(1, max(1, tries) + 1):
+        row = _run_once(task, combo, folder if attempt == 1 else f"{folder}-try{attempt}", runs_dir, entry,
+                        budget, max_calls, timeout, say)
+        if not is_void(row):
+            return row
+        row["void"] = True
+        if attempt < max(1, tries):
+            say(f"   {task['name']} / {combo['name']}: the provider would not serve it; trying once more")
+        else:
+            say(f"   {task['name']} / {combo['name']}: void — the provider would not serve it")
+    return row
+
+
+def _run_once(task, combo, folder, runs_dir, entry, budget, max_calls, timeout, say):
     started = time.time()
     prepare(task, folder)
     flags = []
     for role, spec in combo["roles"].items():
         flags += ["--panel-model" if role == "panel" else f"--{role}", spec]
-    args = [sys.executable, entry, task["text"], "--repo", folder, "--no-ask", "--budget", str(budget),
-            "--max-calls", str(max_calls), *flags]
+    # "--unattended stop": a line-up that quietly became a different one would measure nothing
+    args = [sys.executable, entry, task["text"], "--repo", folder, "--no-ask", "--unattended", "stop",
+            "--budget", str(budget), "--max-calls", str(max_calls), *flags]
     env = {**os.environ, "MP_RUNS": runs_dir, "MP_VIZ": "0"}
     row = {"task": task["name"], "combo": combo["name"], "roles": dict(combo["roles"]), "folder": folder}
     try:
@@ -196,9 +223,14 @@ def newest_metadata(runs_dir, project):
 
 
 def summarize(rows):
-    """Per combination: how often the work really works, what the judge said, and what it cost."""
-    combos = {}
+    """Per combination: how often the work really works, what the judge said, and what it cost.
+    Void runs (the provider would not serve them) are counted apart: they measure nothing."""
+    combos, voids = {}, {}
     for row in rows:
+        if row.get("void"):
+            voids[row["combo"]] = voids.get(row["combo"], 0) + 1
+            combos.setdefault(row["combo"], [])
+            continue
         if "works" not in row:
             combos.setdefault(row["combo"], []).append(None)
             continue
@@ -211,7 +243,7 @@ def summarize(rows):
         false_yes = [r for r in done if r["approved"] and not r["works"]]
         false_no = [r for r in done if r["works"] and not r["approved"]]
         out.append({
-            "combo": name, "runs": runs, "failed_to_run": runs - len(done),
+            "combo": name, "runs": runs, "failed_to_run": runs - len(done), "void": voids.get(name, 0),
             "works": len(works), "works_rate": round(len(works) / runs, 2) if runs else 0,
             "approved": len([r for r in done if r["approved"]]),
             "false_approvals": len(false_yes), "false_rejections": len(false_no),
@@ -228,7 +260,8 @@ def summarize(rows):
 
 def table(summary):
     """The summary as text anyone can read."""
-    head = f"{'line-up':28} {'works':>7} {'judge wrong':>12} {'minutes':>8} {'passes':>7} {'calls':>6} {'$ billed':>9}"
+    head = (f"{'line-up':28} {'works':>7} {'judge wrong':>12} {'minutes':>8} {'passes':>7} {'calls':>6} "
+            f"{'$ billed':>9} {'void':>5}")
     lines = [head, "-" * len(head)]
     for s in summary:
         wrong = f"{s['false_approvals']}✓ {s['false_rejections']}✗"
@@ -236,10 +269,10 @@ def table(summary):
                      f"{(s['median_minutes'] if s['median_minutes'] is not None else '-'):>8} "
                      f"{(s['median_passes'] if s['median_passes'] is not None else '-'):>7} "
                      f"{(s['median_calls'] if s['median_calls'] is not None else '-'):>6} "
-                     f"{s['billed_usd']:>9.2f}")
+                     f"{s['billed_usd']:>9.2f} {(s.get('void') or ''):>5}")
     lines.append("")
     lines.append("works = the hidden tests pass. judge wrong: ✓ approved work that does not work, "
-                 "✗ rejected work that does.")
+                 "✗ rejected work that does. void = the provider would not serve the run; it measures nothing.")
     return "\n".join(lines)
 
 

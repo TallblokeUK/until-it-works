@@ -37,6 +37,7 @@ class Options:
     max_test_repairs: int = 2
     max_usd: float = 0.0           # spending cap on real money (not Claude on Max), 0 = none
     shape: str = "auto"            # auto (the planner decides), solo or swarm
+    unattended: str = "switch"     # nobody watching and a model cannot be used: switch to another, or stop
     auto_rejudge: int = 1          # times a crashed reviewer is simply run again before asking
 
 
@@ -338,9 +339,14 @@ class Context:
         }.get(kind, "keeps failing")
         detail = error_line(reply.text)
         self.say(f"   provider trouble: {who} {what}: {detail}")
-        if not self.options.ask:
-            return False
         offer = self.switch_choices(who, worker) if kind in ("fatal", "rate", "failed") else None
+        if not self.options.ask:
+            # Nobody is waiting: stopping here loses hours of work over a provider's bad quarter of
+            # an hour. Switching is recorded in the log and the run's metadata, so it is never a secret.
+            if offer and self.options.unattended == "switch":
+                self.say(f"   nobody is watching, so carrying on with another model instead of {who}")
+                return self.switch_model(offer[0], offer[1], offer[2][0]["spec"], worker)
+            return False
         question = (f"{who} {what} ({detail}). Sort it out if it needs you (credit, login, network), then reply "
                     f"'retry' to carry on, or 'stop' to end the run.")
         if offer:

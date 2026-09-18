@@ -1406,3 +1406,45 @@ class BenchSuggest(unittest.TestCase):
             self.assertEqual(m["runs"], 6, pid)
             self.assertGreater(m["minutes"], 0, pid)
         self.assertIsNone(found["mixed"]["measured"])      # never run exactly as this preset builds it
+
+
+class BenchVoidRuns(unittest.TestCase):
+    def test_a_run_the_provider_would_not_serve_is_void_not_a_failure(self):
+        from mp_agent import bench
+        void = {"combo": "g", "outcome": "NOT approved: antigravity:gemini-3.8-flash-high was unavailable (fatal)"}
+        self.assertTrue(bench.is_void(void))
+        self.assertTrue(bench.is_void({"combo": "g", "outcome": "NOT approved: the reviewer could not run (exit 1)"}))
+        self.assertFalse(bench.is_void({"combo": "g", "outcome": "NOT approved: the 30 minute safety budget ran out"}))
+        self.assertFalse(bench.is_void({"combo": "g", "works": True, "outcome": "approved: checks pass"}))
+        rows = [dict(void, void=True),
+                {"combo": "g", "works": True, "approved": True, "seconds": 600, "passes": 1, "counters": {},
+                 "costs": {}, "upgrades": []}]
+        summary = bench.summarize(rows)[0]
+        self.assertEqual((summary["runs"], summary["works"], summary["void"]), (1, 1, 1))
+        self.assertIn("void", bench.table(bench.summarize(rows)))
+
+
+class ProjectTeam(unittest.TestCase):
+    def test_a_project_keeps_its_own_models_and_can_forget_them(self):
+        from mp_agent import models
+        state, project = tmpdir("mp-state-"), tmpdir("mp-project-")
+        self.assertEqual(models.project_config(state, project), {})
+        models.save_project_config(state, project, {"worker": "claude:haiku", "judge": "claude:opus", "nonsense": "x"})
+        kept = models.project_config(state, project)
+        self.assertEqual(kept, {"worker": "claude:haiku", "judge": "claude:opus"})
+        self.assertEqual(models.project_config(state, tmpdir("mp-other-")), {})   # only that project
+        self.assertIn(os.path.realpath(project), models.projects_with_roles(state))
+        models.save_project_config(state, project, {})
+        self.assertEqual(models.project_config(state, project), {})
+        self.assertEqual(models.projects_with_roles(state), {})
+
+    def test_the_general_config_is_untouched_by_a_project_team(self):
+        from mp_agent import models
+        state, project = tmpdir("mp-state-"), tmpdir("mp-project-")
+        models.save_config(state, {"worker": "claude:sonnet", "judge": "claude:opus", "planner": "claude:opus",
+                                   "reviewer": "", "panel": ""})
+        models.save_project_config(state, project, {"worker": "claude:haiku"})
+        self.assertEqual(models.load_config(state)["worker"], "claude:sonnet")
+        merged = {**models.load_config(state), **models.project_config(state, project)}
+        self.assertEqual(merged["worker"], "claude:haiku")      # how a job started there chooses
+        self.assertEqual(merged["judge"], "claude:opus")
