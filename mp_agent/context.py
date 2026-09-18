@@ -214,9 +214,10 @@ class Context:
             return ""
         label = lambda spec: models.label_for(spec, self.model_options)
         latest = next((l.strip() for l in (feedback or "").splitlines() if l.strip() and not l.startswith("#")), "")[:200]
-        if settings["mode"] == "auto":
+        if settings["mode"] == "auto" or self.alone():
             wanted = next((c["spec"] for c in choices if c["spec"] == settings["to"]), choices[0]["spec"])
-            return self.switch_worker(worker, current_spec, wanted, "automatically")
+            how = "automatically" if settings["mode"] == "auto" else "nobody is watching"
+            return self.switch_worker(worker, current_spec, wanted, how)
         if not self.options.ask:
             return ""
         options_text = "; ".join(f"'upgrade {c['spec']}' for {c['label']}" for c in choices)
@@ -340,7 +341,7 @@ class Context:
         detail = error_line(reply.text)
         self.say(f"   provider trouble: {who} {what}: {detail}")
         offer = self.switch_choices(who, worker) if kind in ("fatal", "rate", "failed") else None
-        if not self.options.ask:
+        if self.alone():
             # Nobody is waiting: stopping here loses hours of work over a provider's bad quarter of
             # an hour. Switching is recorded in the log and the run's metadata, so it is never a secret.
             if offer and self.options.unattended == "switch":
@@ -377,10 +378,20 @@ class Context:
         except (OSError, ValueError, AttributeError):
             return None
 
+    def alone(self):
+        """True when nobody is waiting: the job was started that way, or you pressed
+        CARRY ON WITHOUT ME while it ran (a file the workshop writes in the run folder)."""
+        return not self.options.ask or os.path.exists(os.path.join(self.run.dir, "alone"))
+
     def ask_person(self, unit, question):
         if not self.options.ask:
             self.say(f"   needs a decision but asking is off: {question}")
             return None
+        if os.path.exists(os.path.join(self.run.dir, "alone")):
+            # Carrying on without you covers what the job can settle itself (a model out of
+            # credit, workers that need upgrading). A real question is still yours to answer,
+            # so it waits, and the notification still goes out.
+            self.say("   carrying on without you, but this one needs you")
         with self._question_lock:
             run = self.run
             answer_path = os.path.join(run.dir, "answer.json")

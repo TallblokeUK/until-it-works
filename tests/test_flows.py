@@ -812,6 +812,57 @@ class Unattended(unittest.TestCase):
         self.assertEqual(ctx.switches, [])
 
 
+class CarryOnWithoutMe(unittest.TestCase):
+    """The workshop's CARRY ON WITHOUT ME writes a file in the run folder while the job runs."""
+
+    def test_a_running_job_settles_provider_trouble_by_itself_once_told_to(self):
+        repo = make_repo({"README": "x"})
+        broken = Reply("ERROR: You've hit your usage limit. Purchase more credits.", 1, 0.01)
+        first = Script("mercury", implement=lambda p, cwd: broken)
+        fresh = Script("luna", implement=lambda p, cwd: write(cwd, "done.txt", "ok\n") or "done", review=approve,
+                       panel=approve)
+        ctx = context(first, Script("sonnet", audit=approve), Script(plan=lambda *a: plan_reply(single())),
+                      reviewer=fresh, panel=fresh)
+        ctx.roles = {"worker": "cline:inception:mercury-2.5", "reviewer": None, "panel": None,
+                     "planner": "claude:sonnet", "judge": "claude:sonnet"}
+        ctx.model_options = [{"spec": s, "label": s} for s in ("claude:sonnet", "codex:gpt-5.6-luna")]
+        ctx.make_worker = ctx.make_agent = lambda spec: fresh
+        self.assertFalse(ctx.alone())
+        with open(os.path.join(ctx.run.dir, "alone"), "w") as fh:      # the button
+            fh.write("x")
+        self.assertTrue(ctx.alone())
+        result = orchestrate(ctx, repo)
+        self.assertTrue(result["approved"], log(ctx))
+        self.assertIn("nobody is watching, so carrying on with another model", log(ctx))
+
+    def test_a_real_question_still_waits_for_you(self):
+        repo = make_repo({"README": "x"})
+        asked = {}
+
+        def implement(prompt, cwd):
+            # once the person has answered, the work is put right; until then it keeps missing
+            write(cwd, "done.txt", "ok\n" if asked.get("it") else "no\n")
+            return "answered" if asked.get("it") else "same mistake"
+
+        lead = Script(plan=lambda *a: plan_reply(single()), ruling=lambda *a: "NO AMENDMENT",
+                      replan=lambda *a: "no", question=lambda *a: "QUESTION: which way round should it be?")
+        builder = Script("mercury", implement=implement, review=approve, panel=approve)
+        ctx = context(builder, Script("sonnet", audit=approve), lead, patience=2)
+        ctx.upgrade = {"mode": "never", "to": "", "max": 0}
+        with open(os.path.join(ctx.run.dir, "alone"), "w") as fh:      # the button
+            fh.write("x")
+
+        def person():
+            if wait_for(os.path.join(ctx.run.dir, "question.json"), timeout=20):
+                asked["it"] = True
+                answer(ctx, {"answer": "the second way round"})
+        threading.Thread(target=person, daemon=True).start()
+        result = orchestrate(ctx, repo)
+        self.assertTrue(asked.get("it"), "a real question should still have been asked")
+        self.assertIn("carrying on without you, but this one needs you", log(ctx))
+        self.assertTrue(result["approved"], log(ctx))
+
+
 class WaveZero(unittest.TestCase):
     def test_tests_written_first_then_frozen(self):
         repo = make_repo()

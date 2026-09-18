@@ -138,6 +138,9 @@ def parser():
     shape.add_argument("--swarm", dest="shape", action="store_const", const="swarm",
                        help="split the task into parts built in parallel (default: the planner decides)")
     p.add_argument("--no-ask", action="store_true", help="never wait for you; stop NOT approved instead")
+    p.add_argument("--alone", action="store_true",
+                   help="settle what the job can by itself (a model out of credit, workers that need upgrading); "
+                        "a real question still waits for you")
     p.add_argument("--unattended", choices=("switch", "stop"), default=None,
                    help="with --no-ask, when a model cannot be used at all: switch to another and carry on "
                         "(default), or stop")
@@ -225,6 +228,7 @@ def list_models(argv):
         print(json.dumps({"available": options, "chosen": config, "builtin": models.BUILTIN, "roles": models.ROLES,
                           "presets": found, "preset": extra.get("preset"), "tuning": models.load_tuning(STATE),
                           "upgrade": models.load_upgrade(STATE),
+                          "unattended": models.load_unattended(STATE),
                           "max_usd": float(extra.get("max_usd") or 0)}))
         return 0
     for role in models.ROLES:
@@ -1359,6 +1363,8 @@ def main(argv):
                       budget_minutes=args.budget, max_calls=args.max_calls, shape=args.shape or "auto",
                       unattended=args.unattended or models.load_unattended(STATE),
                       max_usd=args.max_usd if args.max_usd is not None else float(models.load_extra(STATE).get("max_usd") or 0))
+    if args.alone:
+        run.write_text("alone", "started with --alone\n")
     decisions = Decisions(save=lambda items: run.write_json("decisions.json", items))
     if resume_info:
         decisions.items = list(resume_info["decisions"])

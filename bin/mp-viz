@@ -117,6 +117,7 @@ def state(wanted=None, project=None):
         "roles": jsonfile("roles.json") or {},
         "run": os.path.basename(run),
         "live": bool(live),
+        "alone": os.path.exists(os.path.join(run, "alone")),
         "task": read(os.path.join(run, "task.md")).strip(),
         "phase": read(os.path.join(run, "phase")).strip(),
         "log": log,
@@ -169,6 +170,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                   timeout=60)
             return self.reply(200 if proc.returncode == 0 else 500, "application/json",
                               (proc.stdout or json.dumps({"error": proc.stderr})).encode())
+        if path == "/api/alone":
+            body = self.body()
+            run = str(body.get("run") or "")
+            if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
+                return self.reply(400, "text/plain", b"which run?")
+            marker = os.path.join(RUNS, run, "alone")
+            if body.get("on"):
+                with open(marker, "w") as fh:
+                    fh.write("the workshop was told to carry on without you\n")
+            elif os.path.exists(marker):
+                os.remove(marker)
+            return self.reply(200, "application/json", json.dumps({"alone": bool(body.get("on"))}).encode())
         if path == "/api/again":
             run = str(self.body().get("run") or "")
             if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
@@ -336,6 +349,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 flags.append("--init")
             if job.get("shape") in ("solo", "swarm"):
                 flags.append("--" + job["shape"])
+            if job.get("alone"):
+                flags.append("--alone")
             for role in ROLES:
                 if job.get(role):
                     flags += ["--panel-model" if role == "panel" else f"--{role}", str(job[role])]
@@ -359,6 +374,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok = proc.returncode == 0 and "Started:" in out
             return self.reply(200 if ok else 409, "application/json" if ok else "text/plain",
                               json.dumps({"detail": out}).encode() if ok else out.replace("NEEDS: ", "").encode())
+        if path == "/api/alone":
+            body = self.body()
+            run = str(body.get("run") or "")
+            if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
+                return self.reply(400, "text/plain", b"which run?")
+            marker = os.path.join(RUNS, run, "alone")
+            if body.get("on"):
+                with open(marker, "w") as fh:
+                    fh.write("the workshop was told to carry on without you\n")
+            elif os.path.exists(marker):
+                os.remove(marker)
+            return self.reply(200, "application/json", json.dumps({"alone": bool(body.get("on"))}).encode())
         if path == "/api/again":
             run = str(self.body().get("run") or "")
             if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
@@ -565,6 +592,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 args += ["--claude-billing", wanted["claude_billing"]]
             if wanted.get("when_stuck") in ("ask", "auto", "never"):
                 args += ["--when-stuck", wanted["when_stuck"], "--upgrade-to", str(wanted.get("upgrade_to") or "")]
+            if wanted.get("unattended") in ("switch", "stop"):
+                args += ["--unattended", wanted["unattended"]]
             proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
             if proc.returncode != 0:
                 return self.reply(409, "text/plain", (proc.stderr or proc.stdout).encode())

@@ -256,6 +256,7 @@
     <button class="stopbtn setbtn" id="openTidy">TIDY</button>
     <button class="stopbtn setbtn" id="openSetup">SETUP</button>
     <button class="stopbtn setbtn" id="openSettings">MODELS</button>
+    <button class="stopbtn" id="aloneBtn" hidden title="settle what it can by itself: a model out of credit, or workers that need upgrading. A real question still waits for you.">CARRY ON WITHOUT ME</button>
     <button class="stopbtn" id="stopRun" hidden>STOP RUN</button>
     </nav>
     <div class="projectbar" id="projectBar" hidden></div>
@@ -284,6 +285,7 @@
       <label>Panel<select id="job-panel"></select></label>
       <label>Judge<select id="job-judge"></select></label>
       <label>Spending cap $ <small>blank = your default</small><input id="jobCap" inputmode="decimal" placeholder="default"></label>
+      <label class="setupbilling"><input type="checkbox" id="jobAlone"> Don't wait for me: settle what it can by itself</label>
     </div>
     <div class="answer"><button type="button" id="startJob">START</button>
       <button type="button" id="queueJob">ADD TO QUEUE</button>
@@ -428,6 +430,10 @@
         <label>Panel <small>three lenses before the judge</small><select id="set-panel"></select></label>
         <label>Judge <small>the final audit, the last word</small><select id="set-judge"></select></label>
         <label>Spending cap per job <small>money billed to API keys, in $ (subscriptions aren't counted); blank = none</small><input id="set-cap" inputmode="decimal" placeholder="none"></label>
+        <label>When nobody is watching <small>a model out of credit or refused</small><select id="set-unattended">
+          <option value="switch">use another model and carry on</option>
+          <option value="stop">stop the job</option>
+        </select></label>
         <label>When the workers get stuck <small>after a ruling hasn't helped</small><select id="set-stuck">
           <option value="ask">offer me a stronger model</option><option value="auto">switch to a stronger model automatically</option>
           <option value="never">never switch models</option></select></label>
@@ -1079,6 +1085,9 @@ function renderHud() {
     if (window.innerWidth > 1180 && over > 1) root.style.setProperty("--trim", over + "px");
   });
   $("stopRun").hidden = !(S.live && !DEMO);
+  $("aloneBtn").hidden = !(S.live && !DEMO);
+  $("aloneBtn").textContent = S.alone ? "WAITING FOR YOU AGAIN" : "CARRY ON WITHOUT ME";
+  $("aloneBtn").style.borderColor = S.alone ? "var(--ok)" : "";
   const q = S.live && S.question && S.question.question;
   $("question").hidden = !q;
   const shown = q && (S.question.choices || []).length ? q.replace(/\s*Reply '[\s\S]*$/, "") : q;
@@ -1584,6 +1593,7 @@ $("saveMemory").addEventListener("click", async () => {
 function jobBody() {
   const kind = jobKind();
   return { task: $("jobTask").value, kind, name: $("jobName").value, max_usd: $("jobCap").value.trim(), shape: $("jobShape").value,
+           alone: $("jobAlone").checked,
            value: kind === "local" ? $("jobLocal").value : kind === "github" ? $("jobGithub").value : "",
            ...Object.fromEntries(ROLE_NAMES.map((role) => [role, $("job-" + role).value])) };
 }
@@ -2021,6 +2031,7 @@ $("openSettings").addEventListener("click", async () => {
     $("set-cap").value = modelInfo.max_usd ? String(modelInfo.max_usd) : "";
     const up = modelInfo.upgrade || { mode: "ask", to: "" };
     $("set-stuck").value = up.mode;
+    $("set-unattended").value = modelInfo.unattended || "switch";
     $("set-upgradeto").innerHTML = '<option value="">the strongest available</option>';
     for (const o of modelInfo.available) { const opt = document.createElement("option"); opt.value = o.spec; opt.textContent = o.label; $("set-upgradeto").appendChild(opt); }
     $("set-upgradeto").value = up.to || "";
@@ -2033,11 +2044,17 @@ $("saveSettings").addEventListener("click", async () => {
   const body = preset ? { preset } : Object.fromEntries(ROLE_NAMES.map((role) => [role, $("set-" + role).value]));
   body.max_usd = $("set-cap").value.trim() === "" ? 0 : $("set-cap").value.trim();
   body.when_stuck = $("set-stuck").value;
+  body.unattended = $("set-unattended").value;
   body.upgrade_to = $("set-upgradeto").value;
   try {
     const res = await fetch("api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     $("settingsStatus").textContent = res.ok ? "saved: the next runs use these" : `not saved: ${await res.text()}`;
   } catch (e) { $("settingsStatus").textContent = "not saved: the visualizer server is not running"; }
+});
+$("aloneBtn").addEventListener("click", async () => {
+  const on = !S.alone;
+  const res = await postJSON("api/alone", { run: S.run, on });
+  if (res.ok) { S.alone = on; $("aloneBtn").textContent = on ? "WAITING FOR YOU AGAIN" : "CARRY ON WITHOUT ME"; }
 });
 $("stopRun").addEventListener("click", async () => {
   if (!confirm("Stop this run? Everything it has done so far is kept on its branch.")) return;

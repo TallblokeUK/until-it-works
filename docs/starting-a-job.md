@@ -44,6 +44,21 @@ project, a GitHub repository, a new project or a one-off) and which models.
 **START** runs it now; **ADD TO QUEUE** runs it after whatever is already
 running.
 
+## Carrying on without you
+
+A job asks you when it cannot settle something itself, and waits. If you are going out,
+press **CARRY ON WITHOUT ME** on the running job (or tick "Don't wait for me" in NEW JOB,
+or pass `--alone`). Then:
+
+- a model that is out of credit or refused is **swapped for another one** and the job
+  carries on, saying so in the log;
+- workers that are stuck are **upgraded** to a stronger model by themselves;
+- a real question — one only you can answer — **still waits for you**, with the usual
+  notification. Press the button again to go back to being asked about everything.
+
+What happens when nobody is watching at all (`--no-ask`, queued jobs) is set once in
+MODELS → "When nobody is watching": use another model and carry on, or stop.
+
 ## Solo or swarm
 
 A job runs **solo** (one worker on the whole task) or as a **swarm** (the task
