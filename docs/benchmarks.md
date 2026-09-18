@@ -44,8 +44,11 @@ except Mercury ran on a subscription, so the only bills were Mercury's.
 | Mercury builds, Opus plans and judges | 6/6 | 9.1 | 3.0 | $1.01 |
 | Luna builds, Opus plans and judges | 6/6 | 13.9 | 5.0 | $0.00 |
 | Haiku builds, Opus plans and judges | 5/6 | 18.7 | 2.0 | $0.00 |
-| Luna builds, Sol plans and judges (`openai`) | 5/6 | 10.2 | 3.0 | $0.00 |
+| Luna builds, Sol plans and judges (`openai`) | 6/6* | 10.2 | 3.0 | $0.00 |
 | Gemini 3.8 Flash builds, Opus plans and judges | 0/6 | — | — | $0.00 |
+
+\* one run stopped because OpenAI refused the model ("Selected model is at capacity"); re-run
+the next day on the same task and line-up, it worked.
 
 **In 42 runs: no false approvals and no false rejections.** Every piece of work the judge
 approved passes the hidden tests, and nothing correct was turned away.
@@ -62,7 +65,7 @@ There were three exceptions, none of them a wrong answer:
 - Haiku once used the whole 30-minute budget and produced nothing at all. Stopped, not
   approved.
 - One all-OpenAI run stopped because OpenAI refused the model: "Selected model is at
-  capacity."
+  capacity." Re-run later, the same line-up did the same task without trouble.
 - Every Gemini run was lost to its provider (see below).
 
 **The strong model belongs where the thinking is, not where the agreeing is.** Same Mercury

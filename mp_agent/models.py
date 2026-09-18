@@ -63,7 +63,7 @@ PRESETS = [
               "Measured at 10.2 minutes a task, with more passes than Claude needs.",
      "roles": {"worker": ["codex:*luna*", "codex:*mini*", "codex:*"], "planner": ["codex:*sol*", "codex:*"],
                "judge": ["codex:*sol*", "codex:*terra*", "codex:*"]},
-     "measured": {"runs": 6, "works": 5, "minutes": 10.2, "passes": 3.0, "billed_per_run": 0.0},
+     "measured": {"runs": 6, "works": 6, "minutes": 10.2, "passes": 3.0, "billed_per_run": 0.0},
      "tuning": {"panel_size": 1, "patience": 2, "churn": 5}},
     {"id": "mixed", "name": "Claude plans, GPT builds",
      "about": "Opus plans and judges, a fast GPT does the work, Sonnet reviews: two companies' models checking each "
