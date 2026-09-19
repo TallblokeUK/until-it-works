@@ -59,6 +59,28 @@ A safety net remains for runaway spend: `--budget` (180 working minutes; time
 waiting for you does not count) and `--max-calls` (800). Reaching it is
 reported NOT approved, with everything kept.
 
+## The designer
+
+Nothing else in the loop owns the look. A planner writes what must be true, a worker
+makes it true, reviewers check it — and the result can meet every contract line while
+arriving in the same grey-card, default-font outfit as everything else.
+
+When the plan says the work changes something a person looks at, a designer runs once,
+before anyone builds, and writes a brief: the direction it commits to, the palette with
+real hex values, type with fallbacks that work offline, spacing, motion, and a "Not this"
+list of clichés to avoid. That brief then goes to the workers, the reviewer, the panel
+and the judge, the same way project rules do.
+
+The designer runs on Claude Code when it can, because that tool carries a frontend-design
+skill it can load (mp-agent gives the designer, and only the designer, the Skill tool for
+this). On any other tool the prompt carries the same intent itself. `--design` and
+`--no-design` override the planner; the model is chosen for you unless you set one.
+
+A brief also adds a fourth panel lens, **look**, which holds the finished thing to the
+brief — the palette, the type, the spacing, what moves — by looking at the result, not
+only the code. It must name the line of the brief that is broken. Taste it merely
+disagrees with is not a reason to object.
+
 ## Project rules
 
 Each AI tool loads its own kind of instructions file by itself (Claude Code reads

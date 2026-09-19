@@ -544,7 +544,7 @@ class StartArguments(unittest.TestCase):
             return "/runs/x"
 
         with mock.patch.object(cli, "HOME", home), mock.patch.object(cli, "launch", side_effect=fake_launch), \
-                mock.patch.object(cli, "choose_models", return_value=({"worker": "w", "planner": "p", "judge": "j", "reviewer": "", "panel": "r"}, [], None)), \
+                mock.patch.object(cli, "choose_models", return_value=({"worker": "w", "planner": "p", "judge": "j", "reviewer": "", "panel": "r", "designer": ""}, [], None)), \
                 mock.patch("sys.stdin") as stdin:
             stdin.isatty.return_value = False
             stdin.read.return_value = "Create notes.txt containing the word hello."
@@ -554,6 +554,7 @@ class StartArguments(unittest.TestCase):
         self.assertEqual(command[command.index("--max-usd") + 1], "0.001")
         self.assertEqual(command[command.index("--reviewer") + 1], "same")
         self.assertEqual(command[command.index("--panel-model") + 1], "r")
+        self.assertEqual(command[command.index("--designer") + 1], "same")
         # a flag start does not know is passed on whole, never read as the start of --panel-model
         with mock.patch.object(cli, "HOME", home), mock.patch.object(cli, "launch", side_effect=fake_launch), \
                 mock.patch.object(cli, "choose_models", return_value=({"worker": "w", "planner": "p", "judge": "j", "reviewer": "", "panel": ""}, [], None)) as chose, \
@@ -1448,3 +1449,60 @@ class ProjectTeam(unittest.TestCase):
         merged = {**models.load_config(state), **models.project_config(state, project)}
         self.assertEqual(merged["worker"], "claude:haiku")      # how a job started there chooses
         self.assertEqual(merged["judge"], "claude:opus")
+
+
+class DesignBrief(unittest.TestCase):
+    BRIEF = """# Design brief
+
+## The direction
+A darkroom timer: one instrument panel on a near-black ground, a safelight amber as the only colour.
+
+## Colour
+- Ground #101114 (dominates)
+- Chalk #f3efe6 for text
+- Safelight #ff7a2f, the one accent
+- short form #abc for the hairline
+
+## Type
+Monospace digits, tabular figures.
+"""
+
+    def test_the_direction_and_the_palette_are_pulled_out_for_the_workshop(self):
+        from mp_agent import design
+        self.assertTrue(design.direction(self.BRIEF).startswith("A darkroom timer"))
+        self.assertEqual(design.palette(self.BRIEF),
+                         ["#101114", "#f3efe6", "#ff7a2f", "#aabbcc"])       # #abc becomes #aabbcc
+        self.assertEqual(design.direction("no sections here"), "")
+        self.assertEqual(design.palette(""), [])
+
+    def test_every_role_sees_the_brief_under_its_own_heading(self):
+        from mp_agent import design
+        section = design.section(self.BRIEF)
+        self.assertTrue(section.startswith("# Design brief"))
+        self.assertIn("### The direction", section)          # one level down, inside a bigger prompt
+        self.assertIn("never overrides the contract", section)
+        self.assertEqual(design.section(""), "")
+
+    def test_who_gets_a_designer(self):
+        from mp_agent import design
+        self.assertTrue(design.wanted({"design": True}))
+        self.assertFalse(design.wanted({"design": False}))
+        self.assertFalse(design.wanted({}))                               # a plan that never mentions it
+        self.assertTrue(design.wanted({"design": False}, "on"))           # --design
+        self.assertFalse(design.wanted({"design": True}, "off"))          # --no-design
+
+    def test_the_designer_is_chosen_for_the_skill_it_can_load(self):
+        from mp_agent import models
+        options = [{"spec": s, "label": s} for s in
+                   ("cline:inception:mercury-2.5", "codex:gpt-6-astra", "claude:sonnet", "claude:opus")]
+        self.assertEqual(models.pick_designer(options, avoid=("cline:inception:mercury-2.5",)), "claude:opus")
+        self.assertEqual(models.pick_designer(options, avoid=("claude:opus", "claude:sonnet")), "codex:gpt-6-astra")
+        self.assertTrue(models.designs_with_a_skill("claude:opus"))
+        self.assertFalse(models.designs_with_a_skill("codex:gpt-6-astra"))
+        problems = [{"spec": "claude:opus", "label": "x", "problem": "out of credit"}, {"spec": "claude:sonnet", "label": "y"}]
+        self.assertEqual(models.pick_designer(problems), "claude:sonnet")   # not one that cannot run
+
+    def test_the_look_lens_only_appears_when_there_is_a_brief(self):
+        from mp_agent import gates
+        self.assertIn("look", gates.LENSES)
+        self.assertIn("Not this", gates.LENSES["look"])

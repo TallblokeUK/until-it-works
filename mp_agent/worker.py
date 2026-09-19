@@ -122,6 +122,8 @@ class Worker:
         parts = [f"# Task\n\n{s.goal}", s.contract.render(), self.ctx.decisions.render(s.name), self.scope_text()]
         if getattr(self.ctx, "project_rules", ""):
             parts.append(self.ctx.project_rules.replace("# Project rules", "## Project rules", 1))
+        if getattr(self.ctx, "design_brief", ""):
+            parts.append(self.ctx.design_brief.replace("# Design brief", "## Design brief", 1))
         if s.check:
             parts.append(f"## Validation\n\nThe work is validated by running `{s.check}` from the project root. "
                          "It must exit 0. The harness runs it after you finish; its result, not your opinion, decides.")

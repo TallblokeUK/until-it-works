@@ -11,7 +11,7 @@ import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-from . import gitops, memory, planner, rules
+from . import design, gitops, memory, planner, rules
 from .contract import Contract
 from .waves import waves
 from .worker import UnitSpec, Worker
@@ -152,6 +152,7 @@ class Orchestrator:
         if not self.rules_loaded:
             self.load_rules()
         run.write_json("plan.json", plan)
+        self.design(plan)
         contract = Contract.from_dict(plan["contract"])
         mode = plan["mode"]
         self.say(f"   plan: {mode} — {plan.get('summary', '')}".rstrip(" —"))
@@ -237,6 +238,31 @@ class Orchestrator:
         if not result.approved:
             return self.finish(self.outcome(False, result.outcome, mode=mode))
         return self.finish(self.outcome(True, self.approved_line(), mode=mode), success=True)
+
+    def design(self, plan):
+        """A job that changes what someone looks at gets its look settled first, in writing."""
+        ctx = self.ctx
+        if ctx.designer is None or not design.wanted(plan, ctx.options.design):
+            return
+        if self.resume:
+            kept = design.saved(self.resume["dir"])
+            if kept:
+                ctx.design_brief = design.section(kept)
+                ctx.run.write_text(design.BRIEF_FILE, kept + "\n")
+                self.say("   design: the brief from before still stands")
+                return
+        self.say(f"── design with {ctx.designer.name}")
+        ctx.run.phase("designing")
+        brief = design.write(ctx, self.task, plan, self.tree)
+        if not brief:
+            self.say("   the designer could not write a brief; building without one")
+            return
+        ctx.design_brief = design.section(brief)
+        line = design.direction(brief)
+        self.say(f"   design: {line}" if line else "   design: the brief is written")
+        colours = design.palette(brief)
+        if colours:
+            self.say("   palette: " + " ".join(colours))
 
     def settled(self, unit):
         return bool(self.resume) and (self.resume["units"].get(unit) or {}).get("state") == "approved"

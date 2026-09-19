@@ -51,6 +51,11 @@ LENSES = {
     "truth": "Your lens: things that are untrue. Comments, docstrings, names, error messages and log text that do "
              "not match what the code does; code or comments copied from elsewhere that describe a different "
              "situation; words like \"exact\", \"safe\", \"validated\" or \"all\" the code does not live up to.",
+    "look": "Your lens: the design brief. Hold the finished thing to it — the direction it committed to, the "
+            "palette, the type and its fallbacks, the spacing, what moves and what must not, and every line under "
+            "\"Not this\". Look at the result, do not only read the code: load the page with the project's own "
+            "check or `mp-agent pagecheck`, or take a screenshot with the browser you have. Say which line of the "
+            "brief is broken and where. Taste you merely disagree with is not a reason to object.",
     "rehearsal": "Your lens: rehearse the final auditor. Read the change the way a careful senior reviewer would "
                  "and predict what it would refuse against this contract. If you are confident it would "
                  "approve, approve.",
@@ -77,10 +82,12 @@ class GateResult:
     trouble: tuple = None                        # (agent name, Reply) when the judge itself could not run
 
 
-def review_prompt(goal, contract, decisions, unit, diff, validation, declines, project_rules=""):
+def review_prompt(goal, contract, decisions, unit, diff, validation, declines, project_rules="", design_brief=""):
     parts = [f"# The requirement\n\n{goal}", contract.render(), decisions.render(unit)]
     if project_rules:
         parts.append(project_rules.replace("# Project rules", "## Project rules", 1))
+    if design_brief:
+        parts.append(design_brief.replace("# Design brief", "## Design brief", 1))
     if declines:
         parts.append("## Findings the implementer declined last pass\n\n" + "\n".join(f"- {d}" for d in declines))
     if len(diff) > MAX_DIFF_CHARS:
@@ -123,7 +130,7 @@ def _guarded(tree, say, fn):
 def review(ctx, worker, diff, validation):
     spec, run = worker.spec, ctx.run
     prompt = review_prompt(spec.goal, spec.contract, ctx.decisions, spec.name, diff, validation, worker.declines,
-                           getattr(ctx, "project_rules", ""))
+                           getattr(ctx, "project_rules", ""), getattr(ctx, "design_brief", ""))
     def reviewing():
         with acting("reviewer", spec.name):
             return _ask(ctx.reviewer, REVIEWER_SYSTEM, prompt, worker.tree, worker.say, "reviewer",
@@ -144,9 +151,13 @@ def review(ctx, worker, diff, validation):
 
 def panel(ctx, worker, diff, validation, size):
     spec, run = worker.spec, ctx.run
-    names = list(LENSES)[:max(0, min(size, len(LENSES)))]
+    # the look lens is extra, and only when there is a brief to hold the work to
+    usual = [n for n in LENSES if n != "look"]
+    names = usual[:max(0, min(size, len(usual)))]
+    if getattr(ctx, "design_brief", "") and size > 0:
+        names.append("look")
     prompt = review_prompt(spec.goal, spec.contract, ctx.decisions, spec.name, diff, validation, worker.declines,
-                           getattr(ctx, "project_rules", ""))
+                           getattr(ctx, "project_rules", ""), getattr(ctx, "design_brief", ""))
     run.write_text(worker.pass_file("panel-prompt.md"), prompt)
 
     def member(name):
@@ -188,7 +199,7 @@ def panel(ctx, worker, diff, validation, size):
 def audit(ctx, worker, diff, validation):
     spec, run = worker.spec, ctx.run
     prompt = review_prompt(spec.goal, spec.contract, ctx.decisions, spec.name, diff, validation, worker.declines,
-                           getattr(ctx, "project_rules", ""))
+                           getattr(ctx, "project_rules", ""), getattr(ctx, "design_brief", ""))
     run.write_text(worker.pass_file("audit-prompt.md"), prompt)
     def auditing():
         with acting("judge", spec.name):

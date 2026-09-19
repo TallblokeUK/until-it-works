@@ -589,7 +589,9 @@ function swarmWorker(id) {
   }
   return swarmers[id];
 }
-const everyone = () => [...cast, ...Object.values(swarmers), ...(typeof janitor !== "undefined" && janitor.active ? [janitor] : [])];
+const everyone = () => [...cast, ...Object.values(swarmers),
+  ...(typeof janitor !== "undefined" && janitor.active ? [janitor] : []),
+  ...(typeof designer !== "undefined" && designer.active ? [designer] : [])];
 function speaker(unit) { return unit && swarmers[unit] ? swarmers[unit] : builder; }
 
 // ---- fired and hired: the workers are upgraded to a stronger model --------------------------------
@@ -970,6 +972,10 @@ function onLine(line, t) {
   if (/provider trouble: /.test(line)) { say(me, "the provider is down!", "bad", 5); me.sweat = t + 5; return; }
   if (/running it again/.test(line)) { say(reviewer, "sorry, one more go", "", 3); return; }
   if (/^── planning with/.test(line)) { say(judge, "let me draw up a plan", "", 3); return; }
+  if (/^── design with /.test(line)) { startDesigning(t); say(judge, "get the designer in", "", 3); return; }
+  if ((m = line.match(/^\s*palette: (.+)$/))) { paintPalette((m[1].match(/#[0-9a-f]{6}/g) || [])); return; }
+  if ((m = line.match(/^\s*design: (.+)$/))) { finishDesigning(t, m[1]); banner("DESIGN BRIEF", "ok small"); return; }
+  if (/the designer could not write a brief/.test(line)) { finishDesigning(t, "no brief today"); return; }
   if ((m = line.match(/^\s*plan: (single|swarm)/))) { say(judge, m[1] === "swarm" ? "we swarm this one!" : "one job, one builder", "ok", 4); return; }
   if (/^── wave 0/.test(line)) { banner("WAVE 0 · TESTS", "ok small"); say(builder, "tests first!", "", 3); return; }
   if ((m = line.match(/^── wave (\d+)\/(\d+)/))) { banner(`WAVE ${m[1]}/${m[2]}`, "ok small"); return; }
@@ -1307,6 +1313,7 @@ function frame() {
   decide(t);
   decideSwarm(t, S.live ? roleFor(S.phase) : null);
   decideJanitor(t);
+  decideDesigner(t);
   for (const f of EGG_UPDATE) f(t, dt);
   for (const c of everyone()) move(c, dt);
   stepParts(dt, t);
@@ -1317,6 +1324,7 @@ function frame() {
   const role = S.live ? roleFor(S.phase) : null;
   drawRoom(t, S.live ? "live" : "sleep", role);
   drawExtras(t, role);
+  drawEasel(t);
   // the judge stands behind the bench, everyone else in depth order
   drawChar(judge, t);
   drawBenchFront();
@@ -1599,6 +1607,71 @@ function jobBody() {
 }
 
 // ---- tidy up, with a janitor
+// ---- the designer: walks in with an easel when a job's look is being settled ------------------
+// Paints in the palette the brief actually chose (the log prints it), then leaves the canvas
+// standing in the corner for the rest of the job.
+const designer = makeChar("designer", "The Designer", { x: -20, y: 150 },
+  { skin: "#f0c9a4", body: "#d94f8c", shade: "#a33367", legs: "#2e2a4a", shoes: "#f4c542", eye: "#141024" }, 40);
+designer.active = false;
+const EASEL = { x: 54, y: 150 };
+let easel = null;            // { colours, strokes, done } once there is something painted
+function startDesigning(t) {
+  designer.active = true;
+  designer.x = -20; designer.y = 150; designer.dir = 1;
+  designer.state = "arriving"; designer.since = t;
+  easel = { colours: ["#5ef2e6"], strokes: [], up: false };
+  say(designer, "let me see it first", "", 3);
+}
+function paintPalette(colours) {
+  if (!easel || !colours.length) return;
+  easel.colours = colours.slice(0, 6);
+}
+function finishDesigning(t, line) {
+  if (!designer.active) return;
+  designer.state = "showing"; designer.since = t;     // stand by the finished canvas first, then go
+  if (easel) easel.done = true;
+  if (line) say(designer, line.length > 46 ? line.slice(0, 44) + "…" : line, "ok", 6);
+}
+function decideDesigner(t) {
+  if (!designer.active) return;
+  if (designer.state === "arriving") {
+    goTo(designer, { x: EASEL.x + 10, y: EASEL.y }, "idle");
+    if (Math.hypot(designer.x - EASEL.x - 10, designer.y - EASEL.y) < 2) {
+      designer.state = "painting"; designer.since = t; easel.up = true;
+    }
+    return;
+  }
+  if (designer.state === "showing") {
+    designer.anim = "idle"; designer.tx = designer.x; designer.ty = designer.y; designer.dir = 1;
+    if (t - designer.since > 4) designer.state = "leaving";
+    return;
+  }
+  if (designer.state === "painting") {
+    designer.anim = "work"; designer.tx = designer.x; designer.ty = designer.y; designer.dir = -1;
+    // a stroke every fifth of a second, in the palette it has settled on so far
+    if (!easel.strokes.length || t - (easel.last || 0) > 0.2) {
+      easel.last = t;
+      const c = easel.colours[Math.floor(Math.random() * easel.colours.length)];
+      easel.strokes.push({ x: rnd(1, 18), y: rnd(1, 13), w: rnd(2, 7), h: rnd(1, 3), c });
+      if (easel.strokes.length > 40) easel.strokes.shift();
+    }
+    return;
+  }
+  goTo(designer, { x: -22, y: 150 }, "idle");
+  if (designer.x < -18) { designer.active = false; if (designer.bubble) { designer.bubble.el.remove(); designer.bubble = null; } }
+}
+function drawEasel(t) {
+  if (!easel) return;
+  const { x, y } = EASEL;
+  px(x - 1, y - 4, 2, 4, "#6b4a2a"); px(x + 13, y - 4, 2, 4, "#6b4a2a");    // legs
+  px(x - 2, y - 22, 18, 18, "#3a3560");                                      // frame
+  px(x - 1, y - 21, 16, 16, easel.done ? "#f4f0ff" : "#141024");             // canvas
+  for (const s of easel.strokes) px(x - 1 + s.x % 15, y - 21 + s.y, Math.min(s.w, 16 - (s.x % 15)), s.h, s.c);
+  px(x - 2, y - 4, 18, 2, "#6b4a2a");
+  if (easel.done) {                                                          // the palette, as a row of swatches
+    easel.colours.forEach((c, i) => px(x + i * 3 - 1, y - 3, 2, 2, c));
+  }
+}
 const janitor = makeChar("janitor", "Sweepy", { x: 340, y: 152 },
   { skin: "#e8b88f", body: "#3f6fd6", shade: "#2b4c9c", legs: "#2b4c9c", shoes: "#3a2a1a", eye: "#141024" }, 46);
 janitor.active = false; janitor.route = [];
@@ -1952,6 +2025,11 @@ if (new URLSearchParams(location.search).has("newjob")) setTimeout(() => $("open
   if (params.get("run")) setTimeout(() => { selectedRun = params.get("run"); refreshTabs(); }, 0);
   if (params.has("sweepdemo")) setTimeout(() => sendJanitor(["worktrees", "shots", "orphan_runs"]), 800);
   if (params.has("fire")) setTimeout(() => startHiring(performance.now() / 1000, "cline:inception:mercury-2.5", "claude:opus"), 2500);
+  if (params.has("design")) {                       // ?design=1 plays the designer's visit
+    setTimeout(() => startDesigning(performance.now() / 1000), 1200);
+    setTimeout(() => paintPalette(["#f4c542", "#141024", "#e85d75", "#5ef2e6", "#f4f0ff"]), 3000);
+    setTimeout(() => finishDesigning(performance.now() / 1000, "brutalist: amber on ink, one accent"), 9000);
+  }
   const button = { history: "openHistory", memory: "openMemory", queue: "openQueue", models: "openSettings", setup: "openSetup",
                    changes: "viewChangesBtn" }[params.get("open")];
   if (button) setTimeout(() => $(button).click(), 2500);

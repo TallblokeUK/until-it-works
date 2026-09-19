@@ -29,11 +29,11 @@ import subprocess
 import time
 
 HOME = os.path.expanduser("~")
-ROLES = ("planner", "worker", "reviewer", "panel", "judge")
+ROLES = ("planner", "worker", "reviewer", "panel", "judge", "designer")
 REQUIRED = ("planner", "worker", "judge")
-SAME = ""                           # reviewer / panel: use the workers' model
+SAME = ""                           # reviewer / panel: use the workers' model; designer: chosen for you
 BUILTIN = {"worker": "cline:inception:mercury-2.5", "planner": "claude:sonnet", "judge": "claude:sonnet",
-           "reviewer": SAME, "panel": SAME}
+           "reviewer": SAME, "panel": SAME, "designer": SAME}
 TUNING = {"panel_size": 3, "patience": 3, "churn": 8}
 
 # What each line-up actually did, measured the same way: docs/benchmarks.md. Only line-ups that
@@ -132,6 +132,27 @@ def projects_with_roles(state_dir):
 def effective(choices):
     """Every role with a real spec: an empty reviewer or panel means the workers' model."""
     return {role: (choices.get(role) or choices.get("worker")) for role in ROLES}
+
+
+# Claude Code carries the frontend-design skill, so a designer on Claude is worth more than a
+# stronger model somewhere else; strongest Claude first, then anything decent that is not the workers'.
+DESIGNERS = ["claude:fable", "claude:opus", "claude:sonnet", "codex:*astra*", "codex:*sol*",
+             "antigravity:*pro*", "antigravity:*opus*", "opencode:anthropic/*"]
+
+
+def pick_designer(options, avoid=()):
+    """Who designs when nobody chose: the best available model that is not the workers'."""
+    specs = [o["spec"] for o in options if not o.get("problem")]
+    for pattern in DESIGNERS:
+        for spec in specs:
+            if fnmatch.fnmatch(spec, pattern) and spec not in avoid:
+                return spec
+    return next((spec for spec in specs if spec not in avoid), "")
+
+
+def designs_with_a_skill(spec):
+    """True when the designer runs on a tool that has a design skill of its own."""
+    return str(spec or "").startswith("claude:")
 
 
 def save_config(state_dir, choices):
@@ -452,4 +473,6 @@ def check_independent(choices):
 def label_for(spec, options, role=None):
     if not spec and role in ("reviewer", "panel"):
         return "the workers' model"
+    if not spec and role == "designer":
+        return "chosen for you, when a job needs one"
     return next((o["label"] for o in options if o["spec"] == spec), spec)

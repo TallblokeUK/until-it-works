@@ -18,6 +18,8 @@ Read the project as much as you need (you have read-only tools), then reply with
 {
   "mode": "single" or "swarm",
   "why": "one sentence: why this shape suits this task and this team",
+  "design": true or false,
+
   "summary": "one or two sentences on the approach",
   "contract": {
     "done": ["concrete, checkable statement", "..."],
@@ -33,6 +35,7 @@ Read the project as much as you need (you have read-only tools), then reply with
 }
 
 Rules:
+- design: true when this work changes something a person looks at (a page, a screen, a printed or drawn output, anything with colour, type or layout). A designer then settles how it looks before anyone builds it, and everyone is judged against that brief. false for work nobody sees: a library, a script, a bug fix behind the scenes, a test.
 - "single" or "swarm" is a trade-off; weigh it for this task and this team, and say why in "why". "subtasks" is ignored for "single".
   - "swarm" builds parts in parallel, each in its own copy of the project with its own check and quick review; they are merged, and the merged whole then goes through every gate once more. It pays off when the task has two or more independent parts of real size (separate features, pages, modules or commands), each a few passes of work, and most of all when the workers are fast and cheap. A part that gets stuck does not hold the others up.
   - "single" is one worker on the whole task. It suits small tasks, a single change, and parts that edit the same functions or depend on each other's details, where splitting would only add merges and reviews.
@@ -90,6 +93,8 @@ def validate(plan, repo):
     mode = plan.get("mode")
     if mode not in ("single", "swarm"):
         errors.append('"mode" must be "single" or "swarm"')
+    if "design" in plan and not isinstance(plan.get("design"), bool):
+        errors.append('"design" must be true or false')
     contract = plan.get("contract") or {}
     if not isinstance(contract.get("done"), list) or not contract.get("done"):
         errors.append("contract.done must list at least one checkable statement")

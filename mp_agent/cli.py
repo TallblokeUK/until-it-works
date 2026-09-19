@@ -67,6 +67,7 @@ ROLE_HELP = {
     "worker": "the model that does the work, e.g. mercury, sonnet, gpt-5.5",
     "reviewer": "the quick review after each passing check ('same' = the workers' model)",
     "panel": "the pre-audit panel ('same' = the workers' model)",
+    "designer": "how the work looks, when a job needs a designer ('same' = chosen for you, Claude first)",
     "judge": "the final judge, e.g. opus",
 }
 
@@ -94,7 +95,7 @@ def role_args(choices):
     out = []
     for role in models.ROLES:
         flag = "--panel-model" if role == "panel" else f"--{role}"
-        out += [flag, choices[role] or "same"]
+        out += [flag, choices.get(role) or "same"]
     return out
 
 
@@ -131,6 +132,11 @@ def parser():
     p.add_argument("--no-critic", action="store_true", help="skip the fast reviewer")
     p.add_argument("--no-audit", action="store_true", help="skip the final auditor")
     add_role_flags(p, from_env=True)
+    design = p.add_mutually_exclusive_group()
+    design.add_argument("--design", dest="design", action="store_const", const="on",
+                        help="settle how it looks first, whatever the planner thinks")
+    design.add_argument("--no-design", dest="design", action="store_const", const="off",
+                        help="no designer on this job")
     p.add_argument("--no-plan", action="store_true", help="skip planning: one unit, the task as its contract")
     shape = p.add_mutually_exclusive_group()
     shape.add_argument("--solo", dest="shape", action="store_const", const="solo",
@@ -213,7 +219,7 @@ def choose_models(given=None, options=None, project=None):
 
 
 def roles_line(choices, options):
-    return "; ".join(f"{role} {models.label_for(choices[role], options, role)}" for role in models.ROLES)
+    return "; ".join(f"{role} {models.label_for(choices.get(role), options, role)}" for role in models.ROLES)
 
 
 def list_models(argv):
@@ -1345,13 +1351,16 @@ def main(argv):
     if models.load_extra(STATE).get("claude_billing") == "api":
         claude_key = key_env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
 
-    def wrap(spec, worker=False):
+    def wrap(spec, worker=False, skills=False):
         agent = make_agent(spec, args.timeout, worker=worker, mcp=job_tools, key_env=key_env,
-                           claude_api_key=claude_key)
+                           claude_api_key=claude_key, skills=skills)
         agent.on_activity = run.activity
         return Retrying(agent, pacer, run.say, usage=usage,
                         on_fatal=lambda line: models.note_problem(STATE, spec, line))
     worker_agent = wrap(choices["worker"], worker=True)
+    # the designer wants Claude Code's frontend-design skill, so it gets the Skill tool
+    designer_spec = choices.get("designer") or models.pick_designer(installed_models(), avoid=(choices["worker"],))
+    designer = wrap(designer_spec, skills=models.designs_with_a_skill(designer_spec)) if designer_spec else None
     judge = None if args.no_audit else wrap(choices["judge"])
     planner_agent = None if args.no_plan else wrap(choices["planner"])
     # the same model as the workers still reviews read-only, as a separate agent
@@ -1361,6 +1370,7 @@ def main(argv):
     options = Options(workers=args.workers, patience=args.patience, churn=args.churn, panel_size=args.panel,
                       review=not args.no_critic, audit=not args.no_audit, ask=not args.no_ask, keep=args.keep,
                       budget_minutes=args.budget, max_calls=args.max_calls, shape=args.shape or "auto",
+                      design=args.design or "auto",
                       unattended=args.unattended or models.load_unattended(STATE),
                       max_usd=args.max_usd if args.max_usd is not None else float(models.load_extra(STATE).get("max_usd") or 0))
     if args.alone:
@@ -1370,6 +1380,7 @@ def main(argv):
         decisions.items = list(resume_info["decisions"])
         mark_resumed(resume_info["dir"], run.dir)
     ctx = Context(run, worker_agent, judge, planner_agent, decisions, options, reviewer=reviewer, panel=panel)
+    ctx.designer = designer
     ctx.upgrade = models.load_upgrade(STATE)
     ctx.make_worker = lambda spec: wrap(spec, worker=True)
     ctx.make_agent = lambda spec: wrap(spec)

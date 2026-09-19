@@ -37,6 +37,7 @@ class Options:
     max_test_repairs: int = 2
     max_usd: float = 0.0           # spending cap on real money (not Claude on Max), 0 = none
     shape: str = "auto"            # auto (the planner decides), solo or swarm
+    design: str = "auto"           # auto (the planner decides), on or off: a designer settles the look first
     unattended: str = "switch"     # nobody watching and a model cannot be used: switch to another, or stop
     auto_rejudge: int = 1          # times a crashed reviewer is simply run again before asking
 
@@ -57,6 +58,8 @@ class Context:
         self.run, self.worker, self.judge, self.planner = run, worker, judge, planner_agent
         self.reviewer, self.panel = reviewer or worker, panel or worker
         self.project_rules = ""        # the project's own instructions (rules.py), for every role
+        self.design_brief = ""         # how this job's work is meant to look (design.py), for every role
+        self.designer = None           # the model that decides the look, when a job needs one
         # upgrading the workers when they are stuck (set by the CLI; tests may leave them unset)
         self.upgrade = {"mode": "never", "to": "", "max": 0}
         self.make_worker = None        # spec -> a ready worker agent

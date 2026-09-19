@@ -449,10 +449,12 @@ class ClaudeAgent(Agent):
     worktree, without stopping to ask (the same trust Cline's auto-approve has)."""
 
     def __init__(self, model="sonnet", timeout=900, tools="Read,Grep,Glob", worker=False, mcp=None,
-                 api_key=None, key_env=None):
+                 api_key=None, key_env=None, skills=False):
         self.model, self.timeout, self.worker, self.mcp = model, timeout, worker, mcp
         self.key_env = key_env or {}
-        self.tools = "Read,Grep,Glob,Edit,Write,Bash" if worker else tools
+        # Skills are off unless a role needs them: the designer loads Claude Code's own
+        # frontend-design skill, and without the Skill tool it cannot.
+        self.tools = "Read,Grep,Glob,Edit,Write,Bash" if worker else (tools + ",Skill" if skills else tools)
         self.name = f"claude:{model}"
         self.pace_key = "claude"
         # By default claude_env() leaves no API key, so only the Claude login (a subscription)
@@ -691,7 +693,7 @@ class OpenCodeAgent(Agent):
         return Reply("\n".join(texts), reply.status, reply.seconds, row["usd"], usage)
 
 
-def make_agent(spec, timeout=900, worker=False, mcp=None, key_env=None, claude_api_key=None):
+def make_agent(spec, timeout=900, worker=False, mcp=None, key_env=None, claude_api_key=None, skills=False):
     """claude:MODEL | codex:MODEL | antigravity:MODEL | gemini:MODEL | qwen:MODEL | cline:PROVIDER:MODEL
     | opencode:PROVIDER/MODEL
 
@@ -700,7 +702,8 @@ def make_agent(spec, timeout=900, worker=False, mcp=None, key_env=None, claude_a
     their environment. claude_api_key: set only when the person chose API billing for Claude Code."""
     kind, _, rest = spec.partition(":")
     if kind == "claude":
-        return ClaudeAgent(rest or "sonnet", timeout, worker=worker, mcp=mcp, api_key=claude_api_key, key_env=key_env)
+        return ClaudeAgent(rest or "sonnet", timeout, worker=worker, mcp=mcp, api_key=claude_api_key,
+                           key_env=key_env, skills=skills)
     if kind == "codex":
         return CodexAgent(rest, timeout, worker=worker, mcp=mcp, key_env=key_env)
     if kind == "gemini":
