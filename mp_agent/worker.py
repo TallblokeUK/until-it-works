@@ -124,6 +124,8 @@ class Worker:
             parts.append(self.ctx.project_rules.replace("# Project rules", "## Project rules", 1))
         if getattr(self.ctx, "design_brief", ""):
             parts.append(self.ctx.design_brief.replace("# Design brief", "## Design brief", 1))
+        if getattr(self.ctx, "skills_shelf", ""):
+            parts.append(self.ctx.skills_shelf.replace("# Skills available here", "## Skills available here", 1))
         if s.check:
             parts.append(f"## Validation\n\nThe work is validated by running `{s.check}` from the project root. "
                          "It must exit 0. The harness runs it after you finish; its result, not your opinion, decides.")

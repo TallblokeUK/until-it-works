@@ -59,6 +59,7 @@ class Context:
         self.reviewer, self.panel = reviewer or worker, panel or worker
         self.project_rules = ""        # the project's own instructions (rules.py), for every role
         self.design_brief = ""         # how this job's work is meant to look (design.py), for every role
+        self.skills_shelf = ""         # the skills installed here, offered to the builders (skills.py)
         self.designer = None           # the model that decides the look, when a job needs one
         # upgrading the workers when they are stuck (set by the CLI; tests may leave them unset)
         self.upgrade = {"mode": "never", "to": "", "max": 0}

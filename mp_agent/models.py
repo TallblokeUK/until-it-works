@@ -235,6 +235,15 @@ def load_upgrade(state_dir):
     return {"mode": mode, "to": str(saved.get("to") or ""), "max": max(0, int(saved.get("max", 1) or 0))}
 
 
+def load_skills(state_dir):
+    """Who may load the skills installed on this machine: "off", or "workers".
+
+    Off until it has been measured. A skill steers how work is done, which is the kind of
+    thing this project measures before it makes it a default."""
+    wanted = _load(state_dir).get("skills")
+    return wanted if wanted in ("off", "workers") else "off"
+
+
 def load_pregate(state_dir):
     """{"mode": "off"|"watch"|"on", "threshold": 0..1} for the cheap look before the panel."""
     saved = _load(state_dir).get("pregate") or {}

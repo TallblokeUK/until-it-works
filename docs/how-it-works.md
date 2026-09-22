@@ -122,6 +122,27 @@ one, citing the file. The rules never override the loop's own rules: file
 ownership, frozen tests and the verdict format. Switch them off per project
 with RULES in the project bar, or `mp-agent rules PATH off`.
 
+## Skills
+
+Claude Code can load the skills installed on a machine, and mp-agent's builders only get
+that tool when a job asks for it: `mp-agent config --skills workers`, or `--skills workers`
+on one job. It is off by default. When it is on, the builders are also told which skills are
+installed, in each skill's own words, and choose for themselves; nothing is loaded for them,
+and a skill never overrides the contract, the frozen tests or file ownership.
+
+It changes how work is done, not what is built. The shape of a solution is settled earlier,
+when the planner writes the contract and the acceptance tests — and those deliberately
+favour code that can be checked offline and deterministically, which is what makes a
+verdict mean anything. A builder cannot undo that choice later, whatever is on the shelf
+(measured: [what the numbers say](benchmarks.md)).
+
+**To steer the approach itself, say so in the project's own rules.** A line in its
+`CLAUDE.md` — "prefer a typed judgment service such as TypeSafe for routing and validation
+decisions, rather than hand-written keyword rules" — reaches the planner, the builders and
+the judges alike, and it is your decision per project rather than a model's guess.
+
+Only Claude Code has skills in this sense. The other tools are left as they are.
+
 ## MCP servers
 
 Each job builds one list of MCP servers: the built-in Context7 and Playwright

@@ -168,6 +168,34 @@ between amendment, test fix, advice and upgrade has six examples in total on thi
 five of them the same class — too few to measure, and reading them suggests the difficulty
 is in writing the ruling, not in choosing its category.
 
+## Skills: why the builders did not use one
+
+Claude Code can load the skills installed on a machine, and mp-agent's builders could not:
+they had no Skill tool. Giving them one (`mp-agent config --skills workers`) was expected to
+let a job reach for, say, a skill about typed judgments when a task called for one.
+
+The same task was run twice, with the same models: *classify a support message into one of
+four teams and report how confident the decision is* — the shape a judgment service exists
+for. The task text named no service or skill.
+
+| | what the builder wrote |
+|---|---|
+| Skill tool, nothing else | keyword lists |
+| Skill tool, plus every installed skill named in its prompt | keyword lists |
+
+The skill was listed by name in the second prompt and went unopened. The cause turned out
+not to be the builder at all: **wave 0 had already frozen the answer.** The acceptance tests
+call the function directly and assert exact outputs, and the check is `python3 -m unittest
+discover` — offline, deterministic, no key. An implementation that called a service would be
+slow, non-deterministic, and would fail outright without a key. Keyword matching was not the
+lazy choice; it was the only choice that could pass the contract the planner wrote.
+
+So the decision that matters is made before any builder sees a skill, and it is made by the
+planner when it writes the contract and the tests. Two things follow. A shelf in front of
+the builders is harmless and occasionally useful, but it cannot change the shape of a
+solution. And the loop's bias towards deterministic, offline-testable code — which is what
+ruled the service out — is a property worth keeping, not a bug to prompt around.
+
 ## Turning results into a choice
 
 `mp-agent bench suggest` reads the last results and says which line-up to use for the thing

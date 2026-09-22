@@ -1506,3 +1506,79 @@ Monospace digits, tabular figures.
         from mp_agent import gates
         self.assertIn("look", gates.LENSES)
         self.assertIn("Not this", gates.LENSES["look"])
+
+
+class WorkerSkills(unittest.TestCase):
+    """Claude Code can load the skills a person has installed, but only when it has the Skill
+    tool. Builders do not get it unless the job asks for it."""
+
+    def tools_for(self, **kw):
+        from mp_agent.providers import ClaudeAgent
+        return ClaudeAgent("sonnet", **kw).tools.split(",")
+
+    def test_a_builder_has_no_skills_unless_asked(self):
+        self.assertNotIn("Skill", self.tools_for(worker=True))
+        self.assertIn("Write", self.tools_for(worker=True))
+
+    def test_a_builder_can_be_given_them(self):
+        tools = self.tools_for(worker=True, skills=True)
+        self.assertIn("Skill", tools)
+        self.assertIn("Write", tools)          # still a builder, not a reader
+        self.assertIn("Bash", tools)
+
+    def test_a_judge_never_gets_write_even_with_skills(self):
+        tools = self.tools_for(skills=True)
+        self.assertIn("Skill", tools)
+        self.assertNotIn("Write", tools)
+        self.assertNotIn("Edit", tools)
+
+    def test_the_setting_says_who_gets_them(self):
+        from mp_agent import models
+        state = tmpdir("mp-skills-")
+        self.assertEqual(models.load_skills(state), "off")         # off until it has been measured
+        models.save_extra(state, {"skills": "workers"})
+        self.assertEqual(models.load_skills(state), "workers")
+        models.save_extra(state, {"skills": "nonsense"})
+        self.assertEqual(models.load_skills(state), "off")
+
+
+class InstalledSkills(unittest.TestCase):
+    def a_skill(self, root, name, description, folded=False):
+        where = os.path.join(root, ".claude", "skills", name)
+        os.makedirs(where, exist_ok=True)
+        body = (f"---\nname: {name}\ndescription: >\n  {description}\n---\n\n# {name}\n"
+                if folded else f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n")
+        with open(os.path.join(where, "SKILL.md"), "w") as fh:
+            fh.write(body)
+        return root
+
+    def test_it_reads_names_and_descriptions_including_folded_ones(self):
+        from mp_agent import skills
+        home = tmpdir("mp-skills-home-")
+        self.a_skill(home, "typesafe-ai", "Typed judgments and probabilities instead of generated text")
+        self.a_skill(home, "frontend-design", "Distinctive, production-grade interfaces", folded=True)
+        found = {s["name"]: s["description"] for s in skills.installed(home)}
+        self.assertEqual(sorted(found), ["frontend-design", "typesafe-ai"])
+        self.assertIn("Typed judgments", found["typesafe-ai"])
+        self.assertIn("production-grade", found["frontend-design"])
+
+    def test_a_machine_with_no_skills_offers_nothing(self):
+        from mp_agent import skills
+        self.assertEqual(skills.installed(tmpdir("mp-bare-")), [])
+        self.assertEqual(skills.section([]), "")
+
+    def test_the_section_names_them_and_keeps_the_contract_on_top(self):
+        from mp_agent import skills
+        text = skills.section([{"name": "typesafe-ai", "description": "Typed judgments"}])
+        self.assertIn("- typesafe-ai: Typed judgments", text)
+        self.assertIn("never let a skill override the contract", text)
+
+    def test_a_malformed_skill_is_skipped_rather_than_breaking_the_run(self):
+        from mp_agent import skills
+        home = tmpdir("mp-broken-")
+        where = os.path.join(home, ".claude", "skills", "broken")
+        os.makedirs(where)
+        with open(os.path.join(where, "SKILL.md"), "w") as fh:
+            fh.write("no frontmatter at all\n")
+        self.a_skill(home, "fine", "This one is readable")
+        self.assertEqual([s["name"] for s in skills.installed(home)], ["fine"])

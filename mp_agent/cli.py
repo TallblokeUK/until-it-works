@@ -146,6 +146,8 @@ def parser():
     shape.add_argument("--swarm", dest="shape", action="store_const", const="swarm",
                        help="split the task into parts built in parallel (default: the planner decides)")
     p.add_argument("--no-ask", action="store_true", help="never wait for you; stop NOT approved instead")
+    p.add_argument("--skills", choices=("off", "workers"),
+                   help="let the builders load the skills installed on this machine (Claude Code only)")
     p.add_argument("--alone", action="store_true",
                    help="settle what the job can by itself (a model out of credit, workers that need upgrading); "
                         "a real question still waits for you")
@@ -238,6 +240,7 @@ def list_models(argv):
                           "upgrade": models.load_upgrade(STATE),
                           "unattended": models.load_unattended(STATE),
                           "pregate": models.load_pregate(STATE),
+                          "skills": models.load_skills(STATE),
                           "max_usd": float(extra.get("max_usd") or 0)}))
         return 0
     for role in models.ROLES:
@@ -270,6 +273,8 @@ def set_config(argv):
     p.add_argument("--max-usd", type=float, help="default spending cap per job in dollars (0 = none)")
     p.add_argument("--unattended", choices=("switch", "stop"),
                    help="jobs with nobody watching: switch to another model when one cannot be used, or stop")
+    p.add_argument("--skills", choices=("off", "workers"),
+                   help="whether the builders may load the skills installed on this machine")
     p.add_argument("--pre-gate", choices=("off", "watch", "on"),
                    help="a cheap calibrated look before the panel: off, watch (ask and record, convene everyone), "
                         "or on (skip a member it is confident about)")
@@ -285,6 +290,9 @@ def set_config(argv):
     p.add_argument("--claude-billing", choices=("subscription", "api"),
                    help="how Claude Code is paid for: your Claude login (default) or your stored Anthropic API key")
     args = p.parse_args(argv)
+    if args.skills:
+        models.save_extra(STATE, {"skills": args.skills})
+        print("skills: " + ("the builders may load them" if args.skills == "workers" else "off"))
     if args.pre_gate or args.pre_gate_threshold is not None:
         current = models.load_pregate(STATE)
         if args.pre_gate:
@@ -1448,7 +1456,9 @@ def main(argv):
         agent.on_activity = run.activity
         return Retrying(agent, pacer, run.say, usage=usage,
                         on_fatal=lambda line: models.note_problem(STATE, spec, line))
-    worker_agent = wrap(choices["worker"], worker=True)
+    # the skills installed on this machine reach the builders only when asked for
+    worker_skills = (args.skills or models.load_skills(STATE)) == "workers"
+    worker_agent = wrap(choices["worker"], worker=True, skills=worker_skills)
     # the designer wants Claude Code's frontend-design skill, so it gets the Skill tool
     designer_spec = choices.get("designer") or models.pick_designer(installed_models(), avoid=(choices["worker"],))
     designer = wrap(designer_spec, skills=models.designs_with_a_skill(designer_spec)) if designer_spec else None
@@ -1477,9 +1487,16 @@ def main(argv):
     if pregate["mode"] != "off" and not ctx.fastjudge["key"]:
         print("the pre-gate is switched on but there is no TypeSafe key; the panel runs in full",
               file=sys.stderr)
+    if worker_skills:
+        from . import skills as skills_on_disk
+        found = skills_on_disk.installed(HOME)
+        ctx.skills_shelf = skills_on_disk.section(found)
+        if found:
+            run.say(f"skills     {len(found)} available to the builders: "
+                    + ", ".join(s["name"] for s in found[:6]) + ("…" if len(found) > 6 else ""))
     ctx.designer = designer
     ctx.upgrade = models.load_upgrade(STATE)
-    ctx.make_worker = lambda spec: wrap(spec, worker=True)
+    ctx.make_worker = lambda spec: wrap(spec, worker=True, skills=worker_skills)
     ctx.make_agent = lambda spec: wrap(spec)
     ctx.model_options = models.with_problems(STATE, installed_models())
     ctx.roles = dict(choices)

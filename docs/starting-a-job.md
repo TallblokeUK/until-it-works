@@ -117,6 +117,11 @@ job has run in yet. Git projects are marked.
 
 REPO only looks. It never fetches, pushes or changes anything.
 
+**RULES** is also where you steer *how* something is built, not just its conventions: a
+line like "prefer a typed judgment service such as TypeSafe for routing and validation
+decisions" reaches the planner as it writes the contract, which is the only point where the
+shape of the solution is still open.
+
 **TEAM** in the project bar sets the models this project uses. A job started here uses
 them unless the job says otherwise, and a project without its own team uses your usual
 one. From a terminal: `mp-agent config --project . --preset claude`, and

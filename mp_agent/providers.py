@@ -452,9 +452,11 @@ class ClaudeAgent(Agent):
                  api_key=None, key_env=None, skills=False):
         self.model, self.timeout, self.worker, self.mcp = model, timeout, worker, mcp
         self.key_env = key_env or {}
-        # Skills are off unless a role needs them: the designer loads Claude Code's own
-        # frontend-design skill, and without the Skill tool it cannot.
-        self.tools = "Read,Grep,Glob,Edit,Write,Bash" if worker else (tools + ",Skill" if skills else tools)
+        # Skills are off unless a role asks for them: Claude Code can load the skills a person
+        # has installed, but only when it has the Skill tool. A builder keeps its editing tools
+        # and gains that one; a judge stays read-only either way.
+        base = "Read,Grep,Glob,Edit,Write,Bash" if worker else tools
+        self.tools = base + ",Skill" if skills else base
         self.name = f"claude:{model}"
         self.pace_key = "claude"
         # By default claude_env() leaves no API key, so only the Claude login (a subscription)
