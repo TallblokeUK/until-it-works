@@ -347,6 +347,9 @@
     <label class="setupbilling"><input type="checkbox" id="claudeBilling"> Pay for Claude Code with my Anthropic API key instead of a Claude subscription</label>
     <div class="setupsub">3 · Choose a team <span class="dim">you can change each role later in MODELS</span></div>
     <div id="setupPresets"></div>
+    <div class="setupsub">Skills <span class="dim">installed on this machine; the builders may load one while they work (Claude Code only)</span></div>
+    <label class="setupbilling"><input type="checkbox" id="skillsOn"> Let the builders load these skills</label>
+    <div id="setupSkills"></div>
     <div class="setupsub">MCP servers <span class="dim">the tools every role is given, whatever AI tool it runs on</span></div>
     <div id="setupMcp"></div>
     <div class="mcpadd">
@@ -1850,6 +1853,35 @@ function renderSetup() {
     remove.addEventListener("click", () => changeProtected("remove", name));
     prot.append(el("div", { class: "protectline" }, el("b", { text: name }), remove));
   }
+  // skills installed on this machine
+  const shelf = info.skills || { mode: "off", installed: [] };
+  $("skillsOn").checked = shelf.mode === "workers";
+  $("skillsOn").onchange = async () => {
+    const res = await postJSON("api/settings", { skills: $("skillsOn").checked ? "workers" : "off" });
+    $("setupStatus").textContent = res.ok
+      ? ($("skillsOn").checked ? "The builders may load these while they work."
+                               : "Off: jobs run without them.")
+      : "not changed: " + await res.text();
+  };
+  const box = $("setupSkills"); box.innerHTML = "";
+  if (!shelf.installed.length) {
+    box.append(el("div", { class: "how", text: "No skills are installed for Claude Code on this machine." }));
+  } else {
+    box.append(el("div", { class: "how", text: `${shelf.installed.length} installed. A skill changes how something `
+      + "is built, not what: the shape of the work is settled earlier, when the planner writes the contract. "
+      + "To steer that, put it in the project's RULES." }));
+    for (const skill of shelf.installed) {
+      const line = el("div", { class: "presetline" });
+      // the descriptions are written for a model to match on, so show the first sentence and keep the rest on hover
+      const short = (skill.description.split(/(?<=\.)\s/)[0] || skill.description).slice(0, 150);
+      const b = el("b", { text: skill.name });
+      const d = el("small", { text: short + (short.length < skill.description.length ? "…" : "") });
+      d.title = skill.description;
+      line.append(b, d);
+      box.append(line);
+    }
+  }
+
   // presets
   const presets = $("setupPresets"); presets.innerHTML = "";
   for (const p of info.presets) {

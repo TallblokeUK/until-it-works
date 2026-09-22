@@ -66,7 +66,17 @@ def scan(state_dir):
         "ready_detail": problem or "the chosen models are all available",
         "first_time": not os.path.exists(models.config_path(state_dir)),
         "protected": where.protected(state_dir),
+        "skills": {"mode": models.load_skills(state_dir), "installed": _installed_skills()},
     }
+
+
+def _installed_skills():
+    """Claude Code's skills on this machine. Never fatal: a machine with none is normal."""
+    try:
+        from . import skills
+        return skills.installed()
+    except Exception:
+        return []
 
 
 def _check_choices(config, options):

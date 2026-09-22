@@ -1582,3 +1582,23 @@ class InstalledSkills(unittest.TestCase):
             fh.write("no frontmatter at all\n")
         self.a_skill(home, "fine", "This one is readable")
         self.assertEqual([s["name"] for s in skills.installed(home)], ["fine"])
+
+
+class SkillsInSetup(unittest.TestCase):
+    def test_the_setup_screen_is_told_who_may_load_them(self):
+        from mp_agent import setup
+        state = tmpdir("mp-setup-skills-")
+        shelf = setup.scan(state)["skills"]
+        self.assertEqual(shelf["mode"], "off")
+        self.assertIsInstance(shelf["installed"], list)
+        for entry in shelf["installed"]:
+            self.assertEqual(sorted(entry), ["description", "name"])
+
+    def test_a_quoted_description_loses_its_quotes(self):
+        from mp_agent import skills
+        home = tmpdir("mp-quoted-")
+        where = os.path.join(home, ".claude", "skills", "quoted")
+        os.makedirs(where)
+        with open(os.path.join(where, "SKILL.md"), "w") as fh:
+            fh.write('---\nname: quoted\ndescription: "Guides something, with quotes around it"\n---\n')
+        self.assertEqual(skills.installed(home)[0]["description"], "Guides something, with quotes around it")

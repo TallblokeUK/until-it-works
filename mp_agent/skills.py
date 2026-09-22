@@ -44,6 +44,8 @@ def _read(path):
             first = " ".join(l for l in lines if l)
         found[key] = first
     name, description = found.get("name"), found.get("description")
+    if description:
+        description = description.strip().strip('"\'').strip()      # some are quoted in the frontmatter
     return (name, description) if name and description else None
 
 

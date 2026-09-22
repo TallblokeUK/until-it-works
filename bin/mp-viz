@@ -594,6 +594,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 args += ["--when-stuck", wanted["when_stuck"], "--upgrade-to", str(wanted.get("upgrade_to") or "")]
             if wanted.get("unattended") in ("switch", "stop"):
                 args += ["--unattended", wanted["unattended"]]
+            if wanted.get("skills") in ("off", "workers"):
+                args += ["--skills", wanted["skills"]]
             if wanted.get("pregate") in ("off", "watch", "on"):
                 args += ["--pre-gate", wanted["pregate"]]
             if str(wanted.get("pregate_threshold") or "").strip():
