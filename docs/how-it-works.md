@@ -59,6 +59,32 @@ A safety net remains for runaway spend: `--budget` (180 working minutes; time
 waiting for you does not count) and `--max-calls` (800). Reaching it is
 reported NOT approved, with everything kept.
 
+## The cheap look before the panel
+
+The panel exists because a `VERDICT: APPROVED` line parsed out of prose carries no
+confidence: four cheap opinions agreeing stands in for a number nobody has. A System One
+model (TypeSafe's Jev) returns that number directly, so before the panel is convened one
+call asks, for two of the lenses, how likely it is that there is something there. A lens it
+is confident about is not convened; anything else is, exactly as before.
+
+Two lenses only, and the omissions are the point. `edges` and `truth` are judgments about
+the diff, which is what the model is given. `rehearsal` asks what another model would
+refuse — a judgment about a model's behaviour, with nothing to calibrate against — and
+`look` needs the rendered page, which no diff contains, so it would read confidently clean
+exactly when the rendering is wrong. Both always convene, which also means the pre-gate can
+never empty the panel.
+
+Measured before it was switched on, by replaying it against 51 panel members from past runs
+(12 of whom objected): no objection scored below 0.38, while a quarter of the members that
+approved sat at or below 0.25. At the 0.75 threshold that is about a quarter of those two
+lenses skipped and no objection missed; at 0.6 it starts missing them. `mp-agent pregate`
+shows the same table for your own runs, and `mp-agent pregate backtest` re-asks about passes
+that already happened, which is how a change to the wording is checked.
+
+No key, a failed call, a timeout: the panel runs in full. It is an optimisation, never a
+dependency. Switch it off, or back to watching without skipping, in MODELS or with
+`mp-agent config --pre-gate off|watch|on`.
+
 ## The designer
 
 Nothing else in the loop owns the look. A planner writes what must be true, a worker

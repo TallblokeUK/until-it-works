@@ -594,6 +594,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 args += ["--when-stuck", wanted["when_stuck"], "--upgrade-to", str(wanted.get("upgrade_to") or "")]
             if wanted.get("unattended") in ("switch", "stop"):
                 args += ["--unattended", wanted["unattended"]]
+            if wanted.get("pregate") in ("off", "watch", "on"):
+                args += ["--pre-gate", wanted["pregate"]]
+            if str(wanted.get("pregate_threshold") or "").strip():
+                try:
+                    args += ["--pre-gate-threshold", str(float(wanted["pregate_threshold"]))]
+                except ValueError:
+                    return self.reply(400, "text/plain", b"the pre-gate threshold must be a number")
             proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
             if proc.returncode != 0:
                 return self.reply(409, "text/plain", (proc.stderr or proc.stdout).encode())

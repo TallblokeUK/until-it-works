@@ -35,6 +35,11 @@ SAME = ""                           # reviewer / panel: use the workers' model; 
 BUILTIN = {"worker": "cline:inception:mercury-2.5", "planner": "claude:sonnet", "judge": "claude:sonnet",
            "reviewer": SAME, "panel": SAME, "designer": SAME}
 TUNING = {"panel_size": 3, "patience": 3, "churn": 8}
+# The Jev pre-gate. 0.75 (skip when the chance of a problem is 0.25 or less) was measured,
+# not guessed: on 51 past panel members, 12 of whom objected, no objection ever scored below
+# 0.38, while a quarter of the members that approved sat at or under 0.25. 0.6 is where it
+# starts missing objections. "watch" asks and records without skipping anybody.
+PREGATE = {"mode": "on", "threshold": 0.75}
 
 # What each line-up actually did, measured the same way: docs/benchmarks.md. Only line-ups that
 # were run exactly as the preset builds them carry a "measured" note; "mixed" was not.
@@ -228,6 +233,17 @@ def load_upgrade(state_dir):
     saved = _load(state_dir).get("upgrade") or {}
     mode = saved.get("mode") if saved.get("mode") in ("ask", "auto", "never") else "ask"
     return {"mode": mode, "to": str(saved.get("to") or ""), "max": max(0, int(saved.get("max", 1) or 0))}
+
+
+def load_pregate(state_dir):
+    """{"mode": "off"|"watch"|"on", "threshold": 0..1} for the cheap look before the panel."""
+    saved = _load(state_dir).get("pregate") or {}
+    mode = saved.get("mode") if saved.get("mode") in ("off", "watch", "on") else PREGATE["mode"]
+    try:
+        threshold = min(1.0, max(0.5, float(saved.get("threshold", PREGATE["threshold"]))))
+    except (TypeError, ValueError):
+        threshold = PREGATE["threshold"]
+    return {"mode": mode, "threshold": threshold}
 
 
 def load_unattended(state_dir):

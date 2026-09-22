@@ -8,7 +8,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from . import gitops
+from . import fastjudge, gitops
 from .providers import acting, tagged, verdict
 
 RULES = """Judge the change against the contract below, not against your own idea of what it should be.
@@ -159,6 +159,8 @@ def panel(ctx, worker, diff, validation, size):
     prompt = review_prompt(spec.goal, spec.contract, ctx.decisions, spec.name, diff, validation, worker.declines,
                            getattr(ctx, "project_rules", ""), getattr(ctx, "design_brief", ""))
     run.write_text(worker.pass_file("panel-prompt.md"), prompt)
+    advice = pre_gate(ctx, worker, names, diff, validation)
+    names = advice.convene
 
     def member(name):
         # Members share one worktree and run at once, so they are not guarded
@@ -194,6 +196,29 @@ def panel(ctx, worker, diff, validation, size):
         return GateResult(False, findings="\n\n".join(objections), ambiguities=ambiguities, lines=lines)
     lines.append("   panel approved")
     return GateResult(True, ambiguities=ambiguities, lines=lines)
+
+
+def pre_gate(ctx, worker, names, diff, validation):
+    """Ask Jev, cheaply, whether a member has anything to say — and convene everyone if
+    anything at all goes wrong. Off unless it has been switched on; while off it still asks
+    and still convenes everyone, so the bench can compare what it thought with what happened."""
+    spec, settings = worker.spec, getattr(ctx, "fastjudge", None) or {}
+    if not settings.get("key") or not fastjudge.questions(names):
+        return fastjudge.Advice(convene=list(names))
+    state = fastjudge.state_of(goal=spec.goal, contract=spec.contract.render(), decisions=ctx.decisions.render(),
+                               diff=diff, checks=validation)
+    probabilities = fastjudge.ask(state, fastjudge.questions(names), settings["key"],
+                                  timeout=settings.get("timeout", fastjudge.TIMEOUT))
+    advice = fastjudge.advise(names, probabilities, threshold=settings.get("threshold", 0.9),
+                              skipping=bool(settings.get("skipping")))
+    for line in advice.lines:
+        worker.say(line)
+    if probabilities:
+        ctx.run.write_json(worker.pass_file("pre-gate.json"),
+                           {"probabilities": advice.probabilities, "skipped": advice.skipped,
+                            "would_skip": advice.would_skip, "threshold": settings.get("threshold", 0.9),
+                            "skipping": bool(settings.get("skipping"))})
+    return advice
 
 
 def audit(ctx, worker, diff, validation):

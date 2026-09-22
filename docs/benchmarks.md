@@ -110,6 +110,64 @@ good the model is.
 - GPT-6-Astra was not measured: it is the strongest model on the ChatGPT plan, and worth
   keeping for the planner and judge rather than spending on the building.
 
+## The pre-gate: six shapes, measured
+
+The cheap look before the panel (`docs/how-it-works.md`) rests on one number: the lowest
+probability an objection ever scores. A threshold can only skip below that. Each shape below
+was measured the same way — `mp-agent pregate backtest`, 51 panel members from past runs, 12
+of which objected — changing one thing at a time.
+
+| shape | gap | lowest objection | safely skippable |
+|---|---|---|---|
+| **one broad question per lens, whole prompt as state** | 0.15 | **0.39** | **37%** |
+| the same, asked twice, keeping the worse answer | 0.15 | 0.39 | 37% |
+| five narrow questions per lens, worst kept | 0.15 | 0.22 | 20% |
+| a score over three levels instead of yes/no | 0.17 | 0.23 | 29% |
+| state cut to the diff and the contract | 0.11 | 0.30 | 33% |
+| state cut to the diff alone | 0.04 | 0.12 | 6% |
+
+Then it was switched on and measured again, live, across 12 bench runs (2.7 hours, $1.45):
+
+| | backtest (51 members) | live (34 members) |
+|---|---|---|
+| skipped | 26% | **29%** |
+| objections missed | 0 | **0** |
+| gap | 0.15 | 0.18 |
+| where it breaks | 0.6 | 0.6 |
+
+Every run containing a skip ended approved with no objection from the final judge. The
+backtest predicted the live behaviour closely enough to tune on, which matters: tuning by
+replay costs pennies and minutes, tuning by running the bench costs hours.
+
+**What it saves is calls, not time.** Panel members run in parallel, so a skipped member
+does not shorten the pass — the slowest remaining member still sets the pace. Across those
+12 runs it was 41 panel calls instead of about 51.
+
+Four things worth keeping:
+
+**The average gap is the wrong metric.** Twice a shape separated the two populations better
+on average and was worse as a gate, because one objection landed low. What a gate rests on
+is the floor of the population it must not skip.
+
+**Narrower was not better.** Splitting each lens into small questions and taking the worst
+dragged the objected floor from 0.39 to 0.22. Several individually-unlikely questions do not
+add up to one reliable one.
+
+**Less state was much worse.** TypeSafe's own notes warn that accuracy falls as state grows
+with content unrelated to the decision — but in a code review nothing in that prompt is
+unrelated. The contract is what makes something a defect rather than a preference. Cutting
+it does not remove noise, it removes the criteria.
+
+**Asking twice changed nothing.** The floor was 0.39 both times, so it is a property of the
+model on this task rather than a lucky draw — which is why one call is enough.
+
+Two other uses were tried and are not built. Asking per contract line ("does this change
+satisfy C3?") could not be measured honestly: the only labels available are which lines a
+reviewer *cited*, and citing a line is not the same as failing it. Routing an escalation
+between amendment, test fix, advice and upgrade has six examples in total on this machine,
+five of them the same class — too few to measure, and reading them suggests the difficulty
+is in writing the ruling, not in choosing its category.
+
 ## Turning results into a choice
 
 `mp-agent bench suggest` reads the last results and says which line-up to use for the thing

@@ -27,11 +27,13 @@
     mp-agent history [--json]            where the time and money went, and which judges object
     mp-agent bench [--list] [--task T] [--combo "worker=X,judge=Y"] [--repeat N]   compare model line-ups
     mp-agent bench table | suggest       the last comparison's table, or what it recommends
+    mp-agent pregate [DIR]               what the pre-gate thought, against what the panel said
     mp-agent tidy [--yes] [--all-runs]   clear mp-agent's own leftovers (never your projects or branches)
     mp-agent config [--project [PATH]] --preset P | --planner|--worker|--judge NAME | --max-usd N
                     | --claude-billing subscription|api   change the defaults
 """
 import argparse
+import glob
 import json
 import os
 import re
@@ -235,6 +237,7 @@ def list_models(argv):
                           "presets": found, "preset": extra.get("preset"), "tuning": models.load_tuning(STATE),
                           "upgrade": models.load_upgrade(STATE),
                           "unattended": models.load_unattended(STATE),
+                          "pregate": models.load_pregate(STATE),
                           "max_usd": float(extra.get("max_usd") or 0)}))
         return 0
     for role in models.ROLES:
@@ -267,6 +270,11 @@ def set_config(argv):
     p.add_argument("--max-usd", type=float, help="default spending cap per job in dollars (0 = none)")
     p.add_argument("--unattended", choices=("switch", "stop"),
                    help="jobs with nobody watching: switch to another model when one cannot be used, or stop")
+    p.add_argument("--pre-gate", choices=("off", "watch", "on"),
+                   help="a cheap calibrated look before the panel: off, watch (ask and record, convene everyone), "
+                        "or on (skip a member it is confident about)")
+    p.add_argument("--pre-gate-threshold", type=float,
+                   help="how sure the pre-gate must be to skip a member (0.5-1.0, default 0.9)")
     p.add_argument("--project", nargs="?", const=".",
                    help="set these models for one project only (default: this folder); "
                         "--project PATH --preset none forgets them")
@@ -277,6 +285,14 @@ def set_config(argv):
     p.add_argument("--claude-billing", choices=("subscription", "api"),
                    help="how Claude Code is paid for: your Claude login (default) or your stored Anthropic API key")
     args = p.parse_args(argv)
+    if args.pre_gate or args.pre_gate_threshold is not None:
+        current = models.load_pregate(STATE)
+        if args.pre_gate:
+            current["mode"] = args.pre_gate
+        if args.pre_gate_threshold is not None:
+            current["threshold"] = min(1.0, max(0.5, args.pre_gate_threshold))
+        models.save_extra(STATE, {"pregate": current})
+        print(f"pre-gate: {current['mode']}, threshold {current['threshold']:g}")
     if args.unattended:
         models.save_extra(STATE, {"unattended": args.unattended})
         print("jobs with nobody watching: " + ("switch to another model when one cannot be used"
@@ -687,6 +703,79 @@ def resolve(argv, which):
 
 
 SELFTEST_TASK = "Fix add() in calc.py so python3 test_calc.py prints ok"
+
+
+def pregate_report(argv):
+    """mp-agent pregate [RUNS_DIR...] — what the pre-gate thought, against what the panel said.
+    mp-agent pregate backtest [RUNS_DIR] — ask it again about passes that already happened."""
+    from . import fastjudge
+    if argv and argv[0] == "backtest":
+        return pregate_backtest(argv[1:])
+    folders = argv or [RUNS]
+    rows = []
+    for folder in folders:
+        if glob.glob(os.path.join(folder, "*", "pass-*")):
+            rows += fastjudge.readings(folder)
+        else:
+            for run in sorted(glob.glob(os.path.join(folder, "*"))):
+                rows += fastjudge.readings(run)
+    if not rows:
+        print("no pre-gate readings yet: run some jobs with `mp-agent config --pre-gate watch`")
+        return 0
+    return show_pregate(rows)
+
+
+def pregate_backtest(argv):
+    """Replay the pre-gate against panel verdicts already on disk: a population of real
+    objections, without running a single job. Used to check a change to the wording."""
+    from concurrent.futures import ThreadPoolExecutor
+    from . import fastjudge, keys
+    folder = argv[0] if argv else RUNS
+    key = keys.environment(STATE).get("TYPESAFE_API_KEY") or os.environ.get("TYPESAFE_API_KEY", "")
+    if not key:
+        print("NEEDS: no TypeSafe key (mp-agent keys set typesafe)", file=sys.stderr)
+        return 3
+    work = fastjudge.past_passes(folder)
+    if not work:
+        print(f"no past panel passes with stored prompts under {folder}")
+        return 0
+    print(f"asking again about {len(work)} past pass(es)…")
+
+    def judge(case):
+        _, prompt, verdicts = case
+        probabilities = fastjudge.ask(fastjudge.state_from_prompt(prompt),
+                                      fastjudge.questions(list(verdicts)), key)
+        return [{"lens": lens, "probability": probabilities[lens], "objected": objected}
+                for lens, objected in verdicts.items() if lens in probabilities]
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for got in pool.map(judge, work):
+            rows += got
+    return show_pregate(rows)
+
+
+def show_pregate(rows):
+    from . import fastjudge
+    if not rows:
+        print("nothing was judged")
+        return 0
+    apart = fastjudge.separation(rows)
+    objected = len([r for r in rows if r["objected"]])
+    print(f"\n{len(rows)} member(s) judged, {objected} of them objected\n")
+    print(f"mean probability when the member approved: {apart['approved']}")
+    print(f"mean probability when the member objected: {apart['objected']}")
+    print(f"gap (higher is better; at or below zero the pre-gate is worthless): {apart['gap']}\n")
+    print(f"{'threshold':>10} {'skipped':>9} {'of members':>11} {'would have objected':>21}")
+    for row in fastjudge.curve(rows):
+        print(f"{row['threshold']:>10} {row['skipped']:>9} {row['saved'] * 100:>10.0f}% {row['missed']:>21}")
+    print("\n'would have objected' is the only number that decides it: a skipped member that "
+          "would have asked for changes\nis work that would have shipped unreviewed.")
+    for lens in sorted({r["lens"] for r in rows}):
+        mine = [r for r in rows if r["lens"] == lens]
+        bad = sorted(r["probability"] for r in mine if r["objected"])
+        print(f"\n{lens}: {len(mine)} member(s); objected at {bad if bad else 'never'}")
+    return 0
 
 
 def bench(argv):
@@ -1255,6 +1344,8 @@ def main(argv):
         return stop(argv[1:])
     if argv and argv[0] in ("keep", "discard"):
         return resolve(argv[1:], argv[0])
+    if argv and argv[0] == "pregate":
+        return pregate_report(argv[1:])
     if argv and argv[0] == "bench":
         return bench(argv[1:])
     if argv and argv[0] == "selftest":
@@ -1380,6 +1471,12 @@ def main(argv):
         decisions.items = list(resume_info["decisions"])
         mark_resumed(resume_info["dir"], run.dir)
     ctx = Context(run, worker_agent, judge, planner_agent, decisions, options, reviewer=reviewer, panel=panel)
+    pregate = models.load_pregate(STATE)
+    ctx.fastjudge = {"key": key_env.get("TYPESAFE_API_KEY") or os.environ.get("TYPESAFE_API_KEY", ""),
+                     "threshold": pregate["threshold"], "skipping": pregate["mode"] == "on"}
+    if pregate["mode"] != "off" and not ctx.fastjudge["key"]:
+        print("the pre-gate is switched on but there is no TypeSafe key; the panel runs in full",
+              file=sys.stderr)
     ctx.designer = designer
     ctx.upgrade = models.load_upgrade(STATE)
     ctx.make_worker = lambda spec: wrap(spec, worker=True)

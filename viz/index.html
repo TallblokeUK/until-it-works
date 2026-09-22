@@ -430,6 +430,12 @@
         <label>Panel <small>three lenses before the judge</small><select id="set-panel"></select></label>
         <label>Judge <small>the final audit, the last word</small><select id="set-judge"></select></label>
         <label>Spending cap per job <small>money billed to API keys, in $ (subscriptions aren't counted); blank = none</small><input id="set-cap" inputmode="decimal" placeholder="none"></label>
+        <label>Before the panel <small>a cheap calibrated look (needs a TypeSafe key)</small><select id="set-pregate">
+          <option value="off">off: the whole panel reads every pass</option>
+          <option value="watch">watch: ask and record, but convene everyone</option>
+          <option value="on">on: skip a member it is confident about</option>
+        </select></label>
+        <label>Sure enough to skip <small>0.5-1.0, higher is more cautious</small><input id="set-pregate-threshold" inputmode="decimal" placeholder="0.9"></label>
         <label>When nobody is watching <small>a model out of credit or refused</small><select id="set-unattended">
           <option value="switch">use another model and carry on</option>
           <option value="stop">stop the job</option>
@@ -999,13 +1005,27 @@ function onLine(line, t) {
   else if (/^NOT approved:/.test(line)) {
     say(builder, "we'll get it next time", "bad", 5); banner("STOPPED", "bad"); rainUntil = t + 10; celebrateUntil = t + 10; finalKind = "bad";
   }
+  else if ((m = line.match(/^\s*pre-gate (\w+): ([\d.]+) problem, (.+)$/))) {
+    const c = interns.find((k) => k.lens === m[1]);
+    const p = Number(m[2]), skipped = /^skipped/.test(m[3]), watching = /watching/.test(m[3]);
+    if (c) {
+      c.cleared = skipped;
+      say(c, skipped ? `cleared (${m[2]})` : watching ? `would clear (${m[2]})` : `worth a look (${m[2]})`,
+          skipped ? "ok" : p > 0.5 ? "bad" : "", 3.5);
+    }
+    sparkle(132, 96, skipped ? "#6dff8e" : "#f4c542");
+    return;
+  }
   else if (/pre-audit panel:/.test(line)) { say(builder, "send in the interns!", "", 2.5); }
   else if ((m = line.match(/panel (\w+): approved/))) { const c = interns.find((k) => k.lens === m[1]); if (c) say(c, "looks good", "ok", 3); }
   else if ((m = line.match(/panel (\w+): objected/))) { const c = interns.find((k) => k.lens === m[1]); if (c) { say(c, "found one!", "bad", 3); throwPaper(c, builder, INTERN_HELMET[m[1]]); } }
   else if ((m = line.match(/panel (\w+): no verdict/))) { const c = interns.find((k) => k.lens === m[1]); if (c) say(c, "uhh...", "", 3); }
   else if (/^\s*panel approved$/.test(line)) { say(interns[1], "go see the judge!", "ok", 3); }
   else if (/reviewer changed files/.test(line)) { say(checker, "HANDS OFF THE CODE", "bad", 3); }
-  else if ((m = line.match(/── pass (\d+)/))) { say(me, m[1] === "1" ? "on it!" : `pass ${m[1]}!`, "", 2); rigState = "idle"; }
+  else if ((m = line.match(/── pass (\d+)/))) {
+    say(me, m[1] === "1" ? "on it!" : `pass ${m[1]}!`, "", 2); rigState = "idle";
+    for (const c of interns) c.cleared = false;          // every pass is judged afresh
+  }
   else if (/check exit 0/.test(line)) { rigState = "pass"; checker.glow = "#6dff8e"; say(checker, "PASS", "ok", 2.5); sparkle(125, 90); }
   else if (/check exit [1-9]/.test(line)) { rigState = "fail"; checker.glow = "#ff5a5a"; say(checker, "FAIL!", "bad", 2.5); throwPaper(checker, me, "#ffd6d6"); setTimeout(() => say(me, "fixing...", "", 2), 1000); }
   else if (/final reviewer asked for changes/.test(line)) {
@@ -1226,6 +1246,8 @@ function decide(t) {
     if (c.visit && c.visit.until > t) { goTo(c, c.visit.spot, "work", c.id === "builder"); continue; }
     if (c.intern) {
       if (party && finalKind === "ok" && c.x > 0) { c.anim = "dance"; c.tx = c.x; c.ty = c.y; continue; }
+      // the pre-gate cleared this lens: that intern is not called in for this pass
+      if (role === "panel" && c.cleared) { goTo(c, { x: -14, y: c.jury.y }, "idle", true); continue; }
       if (role === "panel") goTo(c, c.jury, "work", true);
       else goTo(c, { x: -14, y: c.jury.y }, "idle", true);
       continue;
@@ -2110,6 +2132,8 @@ $("openSettings").addEventListener("click", async () => {
     const up = modelInfo.upgrade || { mode: "ask", to: "" };
     $("set-stuck").value = up.mode;
     $("set-unattended").value = modelInfo.unattended || "switch";
+    $("set-pregate").value = (modelInfo.pregate || {}).mode || "off";
+    $("set-pregate-threshold").value = (modelInfo.pregate || {}).threshold ?? 0.9;
     $("set-upgradeto").innerHTML = '<option value="">the strongest available</option>';
     for (const o of modelInfo.available) { const opt = document.createElement("option"); opt.value = o.spec; opt.textContent = o.label; $("set-upgradeto").appendChild(opt); }
     $("set-upgradeto").value = up.to || "";
@@ -2123,6 +2147,8 @@ $("saveSettings").addEventListener("click", async () => {
   body.max_usd = $("set-cap").value.trim() === "" ? 0 : $("set-cap").value.trim();
   body.when_stuck = $("set-stuck").value;
   body.unattended = $("set-unattended").value;
+  body.pregate = $("set-pregate").value;
+  body.pregate_threshold = $("set-pregate-threshold").value.trim();
   body.upgrade_to = $("set-upgradeto").value;
   try {
     const res = await fetch("api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
