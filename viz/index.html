@@ -394,6 +394,22 @@
     <div class="how" id="repoStatus">Nothing here fetches, pushes or changes anything.</div>
   </div>
 
+  <div class="settings" id="githubPanel" hidden>
+    <div class="label">PUT THIS PROJECT ON GITHUB <span class="dim" id="githubProject"></span></div>
+    <div class="how" id="githubWhat">looking…</div>
+    <div class="setgrid" id="githubChoices" hidden>
+      <label>Owner<select id="githubOwner"></select></label>
+      <label>Name<input id="githubName"></label>
+      <label>Who can see it<select id="githubVisibility">
+        <option value="private">private (only you and anyone you add)</option>
+        <option value="public">public (anyone on the internet)</option>
+      </select></label>
+    </div>
+    <div class="answer"><button type="button" id="githubGo">CREATE AND PUSH</button>
+      <button type="button" class="quick" data-close="githubPanel">CANCEL</button></div>
+    <div class="how" id="githubStatus"></div>
+  </div>
+
   <div class="settings" id="teamPanel" hidden>
     <div class="label">THIS PROJECT'S TEAM <span class="dim" id="teamProject"></span></div>
     <div class="how">Which models jobs started in this project use. A job's own choices still win, and without
@@ -506,6 +522,7 @@
         <button type="button" id="viewChangesBtn">VIEW CHANGES</button>
         <button type="button" id="keepBtn">KEEP IT (MERGE)</button>
         <button type="button" id="prBtn">KEEP AS PR…</button>
+        <button type="button" id="githubBtn" hidden>PUT ON GITHUB…</button>
         <button type="button" id="resumeBtn">RESUME</button>
       <button type="button" id="openFolderBtn" hidden>OPEN FOLDER</button>
         <button type="button" class="quick" id="discardBtn">DISCARD</button>
@@ -1155,11 +1172,14 @@ function renderHud() {
     else if (m.approved) how = `The work is on branch ${branch}\nin ${project}\n\nTo look first:  cd ${project} && git diff HEAD...${branch}`;
     else how = `Everything it did is on branch ${branch} in ${project}.\nLogs: ${m.run || ""}`;
     $("resultHow").textContent = how + costLine;
-    $("resultActions").hidden = DEMO || (!!resolved && !m.oneoff) || !branch;
+    // putting it on GitHub is something you do after keeping it, so the row stays for that
+    const canGithub = !!m.project && (resolved === "kept" || !!m.oneoff);
+    $("resultActions").hidden = DEMO || !branch || (!!resolved && !m.oneoff && !canGithub);
     $("openFolderBtn").hidden = !(m.oneoff && resolved === "kept");
     if (m.oneoff && resolved === "kept") { $("keepBtn").hidden = true; $("discardBtn").hidden = true; $("resumeBtn").hidden = true; }
     else $("discardBtn").hidden = false;
     $("keepBtn").hidden = !m.approved || !!(m.oneoff && resolved === "kept");
+    $("githubBtn").hidden = !canGithub;
     $("prBtn").hidden = !m.approved || !!resolved;
     $("viewChangesBtn").hidden = resolved === "discarded" || resolved === "kept";
     const shots = m.screenshots || [];
@@ -1467,7 +1487,7 @@ $("resumeBtn").addEventListener("click", async () => {
 });
 $("discardBtn").addEventListener("click", () => act("discard"));
 // ---- overlays over the scene: only one open at a time
-const OVERLAYS = ["jobForm", "settings", "changesPanel", "queuePanel", "historyPanel", "memoryPanel", "tidyPanel", "setupPanel", "rulesPanel", "teamPanel", "folderPanel", "repoPanel"];
+const OVERLAYS = ["jobForm", "settings", "changesPanel", "queuePanel", "historyPanel", "memoryPanel", "tidyPanel", "setupPanel", "rulesPanel", "teamPanel", "githubPanel", "folderPanel", "repoPanel"];
 function openOverlay(id) { for (const o of OVERLAYS) $(o).hidden = o !== id; }
 for (const b of document.querySelectorAll("[data-close]")) b.addEventListener("click", () => { $(b.dataset.close).hidden = true; });
 const postJSON = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -2250,6 +2270,55 @@ function renderProjects() {
              button("OPEN FOLDER", () => postJSON("api/open-folder", { project: p.path })),
              button("ALL PROJECTS", () => chooseProject(null)));
 }
+$("githubBtn").addEventListener("click", async () => {
+  const project = (S.meta || {}).project;
+  if (!project) return;
+  openOverlay("githubPanel");
+  $("githubProject").textContent = project;
+  $("githubStatus").textContent = "";
+  $("githubChoices").hidden = true;
+  $("githubWhat").textContent = "looking…";
+  let plan;
+  try {
+    const res = await postJSON("api/github/plan", { project });
+    if (!res.ok) { $("githubWhat").textContent = await res.text(); return; }
+    plan = await res.json();
+  } catch (e) { $("githubWhat").textContent = "could not look: the visualizer server is not running"; return; }
+  if (plan.stoppers.length) {
+    $("githubWhat").textContent = "Not possible: " + plan.stoppers.join("; ");
+    $("githubGo").hidden = true;
+    return;
+  }
+  $("githubGo").hidden = false;
+  const warn = plan.warnings.length ? " " + plan.warnings.join(" ") : "";
+  if (plan.action === "push") {
+    $("githubWhat").textContent = `This project already has a remote (${plan.remote}). `
+      + `Its branch ${plan.branch} will be pushed there; nothing new is created.` + warn;
+    $("githubGo").textContent = "PUSH";
+  } else if (!plan.signed_in) {
+    $("githubWhat").textContent = "gh is not signed in here. Run: gh auth login";
+    $("githubGo").hidden = true;
+  } else {
+    $("githubWhat").textContent = `A new repository will be created and branch ${plan.branch} pushed to it. `
+      + "mp-agent has not put anything on GitHub until you press the button." + warn;
+    $("githubGo").textContent = "CREATE AND PUSH";
+    $("githubChoices").hidden = false;
+    const owner = $("githubOwner"); owner.innerHTML = "";
+    for (const o of plan.owners) { const opt = document.createElement("option"); opt.value = opt.textContent = o; owner.append(opt); }
+    $("githubName").value = plan.name;
+  }
+  $("githubGo").onclick = async () => {
+    $("githubGo").disabled = true;
+    $("githubStatus").textContent = "working…";
+    const res = await postJSON("api/github/put", {
+      project, name: $("githubName").value.trim(), owner: $("githubOwner").value,
+      private: $("githubVisibility").value !== "public",
+    });
+    $("githubGo").disabled = false;
+    $("githubStatus").textContent = res.ok ? (await res.json()).detail : await res.text();
+  };
+});
+
 async function openTeam(p) {
   openOverlay("teamPanel");
   $("teamProject").textContent = p.name;

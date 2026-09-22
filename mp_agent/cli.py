@@ -23,6 +23,7 @@
     mp-agent models [--json]             the models available for each role, the presets, the current choices
     mp-agent where [--json] [--refresh]  where a job can run: recent local projects, GitHub repos, new, one-off
     mp-agent pr [--run DIR] [--base BRANCH]   push a finished run's branch and open a GitHub pull request
+    mp-agent github [--repo DIR] [--name N] [--owner O] [--public]   put a finished project on GitHub
     mp-agent queue add [start flags] "task" | list | remove ID | run-next   jobs that run one after another
     mp-agent history [--json]            where the time and money went, and which judges object
     mp-agent bench [--list] [--task T] [--combo "worker=X,judge=Y"] [--repeat N]   compare model line-ups
@@ -713,6 +714,49 @@ def resolve(argv, which):
 SELFTEST_TASK = "Fix add() in calc.py so python3 test_calc.py prints ok"
 
 
+def github_command(argv):
+    """Put a project on GitHub: create the repository and push, or push to the remote it has.
+    Nothing is created until you say so, and it refuses rather than guesses."""
+    from . import ghrepo
+    p = argparse.ArgumentParser(prog="mp-agent github", description=github_command.__doc__)
+    p.add_argument("--repo", default=os.getcwd(), help="the project (default: this folder)")
+    p.add_argument("--name", help="what to call it (default: the folder's name)")
+    p.add_argument("--owner", help="your account or one of your organisations (default: your account)")
+    p.add_argument("--public", action="store_true", help="anyone can see it (default: private)")
+    p.add_argument("--yes", action="store_true", help="do it without asking")
+    args = p.parse_args(argv)
+    plan = ghrepo.plan(args.repo, STATE)
+    print(f"project   {plan['project']}")
+    print(f"branch    {plan['branch']}")
+    for warning in plan["warnings"]:
+        print(f"note      {warning}")
+    if plan["stoppers"]:
+        for stopper in plan["stoppers"]:
+            print(f"NEEDS: {stopper}", file=sys.stderr)
+        return 3
+    if plan["action"] == "push":
+        print(f"remote    {plan['remote']} (nothing new is created)")
+    else:
+        print(f"new       {(args.owner + '/') if args.owner else ''}{args.name or plan['name']}"
+              f" ({'public' if args.public else 'private'})")
+    if not args.yes:
+        answer = input("go ahead? [y/N] ").strip().lower() if sys.stdin.isatty() else "n"
+        if answer not in ("y", "yes"):
+            print("nothing was done")
+            return 0
+    if plan["action"] == "push":
+        detail, problem = ghrepo.push(args.repo)
+    else:
+        url, problem = ghrepo.create(args.repo, args.name or plan["name"], owner=args.owner,
+                                     private=not args.public)
+        detail = f"created {url}" if url else None
+    if problem:
+        print(f"not done: {problem}", file=sys.stderr)
+        return 1
+    print(detail)
+    return 0
+
+
 def pregate_report(argv):
     """mp-agent pregate [RUNS_DIR...] — what the pre-gate thought, against what the panel said.
     mp-agent pregate backtest [RUNS_DIR] — ask it again about passes that already happened."""
@@ -1352,6 +1396,8 @@ def main(argv):
         return stop(argv[1:])
     if argv and argv[0] in ("keep", "discard"):
         return resolve(argv[1:], argv[0])
+    if argv and argv[0] == "github":
+        return github_command(argv[1:])
     if argv and argv[0] == "pregate":
         return pregate_report(argv[1:])
     if argv and argv[0] == "bench":

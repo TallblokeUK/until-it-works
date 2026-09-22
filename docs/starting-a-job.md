@@ -152,6 +152,27 @@ mp-agent start --swarm "add the four easter eggs"           # split into parts b
 `mp-status` shows what's running. `mp-agent answer "…"` answers a question the
 agents are waiting on.
 
+## Putting it on GitHub
+
+mp-agent never creates a repository or pushes on its own. A finished job leaves its work on
+a branch in a folder on this machine, and that is where it stays until you say otherwise.
+
+**PUT ON GITHUB…** sits beside KEEP IT on a finished run, and stays there after you have
+kept it, which is usually when you want it. It says what it is about to do before anything
+exists: which account (yours, or any organisation you belong to), what the repository will
+be called, and who can see it — **private unless you choose otherwise**. From a terminal
+the same step is `mp-agent github`.
+
+It refuses rather than guesses:
+
+- a tracked file that looks like it carries a credential stops it — a private repository is
+  still a copy of that secret somewhere it was not before;
+- a repository protected here is never pushed to;
+- a project that already has a remote has nothing created: its branch is pushed to what is
+  already there, and `mp-agent pr` opens a pull request if that is what you want.
+
+Untracked files are not included, and it says how many there are before you press anything.
+
 ## Where the work goes
 
 The agents never touch the files you are working on. Every job happens on a

@@ -170,31 +170,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                   timeout=60)
             return self.reply(200 if proc.returncode == 0 else 500, "application/json",
                               (proc.stdout or json.dumps({"error": proc.stderr})).encode())
-        if path == "/api/alone":
-            body = self.body()
-            run = str(body.get("run") or "")
-            if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
-                return self.reply(400, "text/plain", b"which run?")
-            marker = os.path.join(RUNS, run, "alone")
-            if body.get("on"):
-                with open(marker, "w") as fh:
-                    fh.write("the workshop was told to carry on without you\n")
-            elif os.path.exists(marker):
-                os.remove(marker)
-            return self.reply(200, "application/json", json.dumps({"alone": bool(body.get("on"))}).encode())
-        if path == "/api/again":
-            run = str(self.body().get("run") or "")
-            if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
-                return self.reply(400, "text/plain", b"which run?")
-            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
-            args = [sys.executable, entry, "again", "--run", os.path.join(RUNS, run)]
-            if self.body().get("same_models"):
-                args.append("--same-models")
-            proc = subprocess.run(args, capture_output=True, text=True, cwd=HOME, timeout=900)
-            out = (proc.stdout + proc.stderr).strip()
-            ok = proc.returncode == 0 and "Started:" in out
-            return self.reply(200 if ok else 409, "application/json" if ok else "text/plain",
-                              json.dumps({"detail": out}).encode() if ok else out.replace("NEEDS: ", "").encode())
         if path == "/api/tidy":
             return self.reply(200, "application/json", json.dumps(tidy.plan(STATE)).encode())
         if path == "/api/queue":
@@ -386,6 +361,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
             elif os.path.exists(marker):
                 os.remove(marker)
             return self.reply(200, "application/json", json.dumps({"alone": bool(body.get("on"))}).encode())
+        if path == "/api/github/plan":
+            from mp_agent import ghrepo, repoinfo
+            wanted = str(self.body().get("project") or "")
+            known = [p["path"] for p in projects.list_projects(RUNS, alive, projects.opened(STATE))]
+            if not any(projects.same(p, wanted) for p in known):
+                return self.reply(404, "text/plain", b"not a project the workshop knows")
+            plan = ghrepo.plan(wanted, STATE)
+            account = repoinfo.github_account()
+            plan["owners"] = [o for o in [account.get("login"), *account.get("orgs", [])] if o]
+            plan["signed_in"] = bool(account.get("login"))
+            return self.reply(200, "application/json", json.dumps(plan).encode())
+        if path == "/api/github/put":
+            from mp_agent import ghrepo
+            body = self.body()
+            wanted, name = str(body.get("project") or ""), str(body.get("name") or "")
+            known = [p["path"] for p in projects.list_projects(RUNS, alive, projects.opened(STATE))]
+            if not any(projects.same(p, wanted) for p in known):
+                return self.reply(404, "text/plain", b"not a project the workshop knows")
+            plan = ghrepo.plan(wanted, STATE)
+            if plan["stoppers"]:
+                return self.reply(400, "text/plain", ("not done: " + "; ".join(plan["stoppers"])).encode())
+            if plan["action"] == "push":
+                detail, problem = ghrepo.push(wanted)
+            else:
+                url, problem = ghrepo.create(wanted, name or plan["name"], owner=str(body.get("owner") or "") or None,
+                                             private=body.get("private", True) is not False)
+                detail = f"created {url}" if url else None
+            if problem:
+                return self.reply(400, "text/plain", ("not done: " + problem).encode())
+            return self.reply(200, "application/json", json.dumps({"detail": detail}).encode())
         if path == "/api/again":
             run = str(self.body().get("run") or "")
             if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
