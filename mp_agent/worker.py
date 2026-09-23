@@ -292,6 +292,7 @@ class Worker:
         model_failures = 0
         self.rejudge = False
         while True:
+            ctx.wait_if_paused(self)
             reason = ctx.should_stop()
             if reason:
                 return self.result(False, f"NOT approved: {reason}")

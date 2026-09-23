@@ -218,6 +218,7 @@
   .answer button{font-family:var(--pixel);font-size:10px;background:var(--gold);color:#141024;border:0;padding:8px 12px;cursor:pointer}
   .answer button.quick{background:#2d2757;color:var(--gold);border:2px solid var(--gold)}
   .panel.say .answer{display:flex;gap:8px} .panel.say input{flex:1}
+  #askAnswer{white-space:pre-wrap;max-height:30vh;overflow:auto}
   .checkrow{display:flex;gap:14px;flex-wrap:wrap;margin-top:4px}
   button.again{background:#2d2757;color:var(--gold);border:2px solid var(--gold);font-size:12px;padding:2px 6px;cursor:pointer}
   .result{margin-top:16px;border:3px solid var(--green);background:#0e2a18;padding:12px 14px}
@@ -258,6 +259,7 @@
     <button class="stopbtn setbtn" id="openTidy">TIDY</button>
     <button class="stopbtn setbtn" id="openSetup">SETUP</button>
     <button class="stopbtn setbtn" id="openSettings">MODELS</button>
+    <button class="stopbtn" id="pauseBtn" hidden title="stop at the end of the pass it is on, so you can look and say something">PAUSE AT THE NEXT PASS</button>
     <button class="stopbtn" id="aloneBtn" hidden title="settle what it can by itself: a model out of credit, or workers that need upgrading. A real question still waits for you.">CARRY ON WITHOUT ME</button>
     <button class="stopbtn" id="stopRun" hidden>STOP RUN</button>
     </nav>
@@ -513,6 +515,12 @@
       <div class="label">SAY SOMETHING <span class="dim">the builders get it on their next pass</span></div>
       <div class="answer"><input id="sayText" placeholder="the colours are wrong, use brand.css"><button type="button" id="sayBtn">SEND</button></div>
       <div class="how" id="sayStatus"></div>
+    </div>
+
+    <div class="panel say" id="askPanel">
+      <div class="label">ASK ABOUT THIS RUN <span class="dim">it reads the papers and answers; it changes nothing</span></div>
+      <div class="answer"><input id="askText" placeholder="why did it drop that requirement?"><button type="button" id="askBtn">ASK</button></div>
+      <div class="how" id="askAnswer"></div>
     </div>
 
     <div class="question" id="question" hidden>
@@ -1146,6 +1154,9 @@ function renderHud() {
   $("stopRun").hidden = !(S.live && !DEMO);
   $("aloneBtn").hidden = !(S.live && !DEMO);
   $("sayPanel").hidden = !(S.live && !DEMO);
+  $("askPanel").hidden = !(S.run && !DEMO);
+  $("pauseBtn").hidden = !(S.live && !DEMO);
+  $("pauseBtn").textContent = S.paused ? "HOLDING AT THE NEXT PASS" : "PAUSE AT THE NEXT PASS";
   $("aloneBtn").textContent = S.alone ? "WAITING FOR YOU AGAIN" : "CARRY ON WITHOUT ME";
   $("aloneBtn").style.borderColor = S.alone ? "var(--ok)" : "";
   const q = S.live && S.question && S.question.question;
@@ -2223,6 +2234,23 @@ $("saveSettings").addEventListener("click", async () => {
     $("settingsStatus").textContent = res.ok ? "saved: the next runs use these" : `not saved: ${await res.text()}`;
   } catch (e) { $("settingsStatus").textContent = "not saved: the visualizer server is not running"; }
 });
+$("pauseBtn").addEventListener("click", async () => {
+  const on = !S.paused;
+  const res = await postJSON("api/pause", { run: S.run, on });
+  if (res.ok) { S.paused = on; $("pauseBtn").textContent = on ? "HOLDING AT THE NEXT PASS" : "PAUSE AT THE NEXT PASS"; }
+});
+async function sendAsk() {
+  const question = $("askText").value.trim();
+  if (!question) return;
+  $("askAnswer").textContent = "reading the papers…";
+  $("askBtn").disabled = true;
+  const res = await postJSON("api/ask", { run: S.run, question });
+  $("askBtn").disabled = false;
+  $("askAnswer").textContent = res.ok ? (await res.json()).answer : await res.text();
+}
+$("askBtn").addEventListener("click", sendAsk);
+$("askText").addEventListener("keydown", (e) => { if (e.key === "Enter") sendAsk(); });
+
 async function sendSay() {
   const text = $("sayText").value.trim();
   if (!text) return;

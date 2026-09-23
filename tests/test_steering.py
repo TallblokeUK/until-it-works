@@ -167,3 +167,88 @@ class CheckpointsInAJob(unittest.TestCase):
         result = Orchestrator(ctx, "test task", repo, tempfile.mkdtemp(prefix="mp-test-trees-")).run()
         self.assertTrue(result["approved"], log(ctx))
         self.assertFalse(os.path.exists(os.path.join(ctx.run.dir, "question.json")))
+
+
+class AskingAboutARun(unittest.TestCase):
+    """Asking a question and getting an answer, without touching the work."""
+
+    def a_run(self):
+        from helpers import tmpdir
+        run = tmpdir("mp-ask-run-")
+        write(run, "task.md", "Build a thing that counts words")
+        write(run, "plan.json", json.dumps({
+            "summary": "one unit", "mode": "single", "check": "python3 -m unittest",
+            "contract": {"done": ["it counts words", "ties broken alphabetically"], "out_of_scope": ["unicode"]}}))
+        write(run, "decisions.json", json.dumps([{"id": "D1", "unit": "main", "kind": "steer",
+                                                  "text": "The person watching said: use a tuple"}]))
+        write(run, "run.log", "── pass 1\n   check exit 0\n   reviewer approved\n")
+        write(run, "main/pass-01/audit.md", "The empty string case is unhandled.\nVERDICT: CHANGES REQUIRED")
+        write(run, "roles.json", json.dumps({"planner": "claude:opus", "worker": "claude:sonnet"}))
+        return run
+
+    def test_the_papers_carry_what_someone_would_need(self):
+        from mp_agent import askrun
+        papers = askrun.papers(self.a_run())
+        for wanted in ("counts words", "ties broken alphabetically", "out of scope", "use a tuple",
+                       "CHANGES REQUIRED", "check exit 0"):
+            self.assertIn(wanted, papers, wanted)
+
+    def test_the_run_s_own_planner_answers(self):
+        from mp_agent import askrun
+        self.assertEqual(askrun.who_answers(self.a_run()), "claude:opus")
+        from helpers import tmpdir
+        self.assertEqual(askrun.who_answers(tmpdir("mp-bare-run-")), "claude:sonnet")     # the fallback
+
+    def test_the_question_and_the_papers_both_reach_the_model(self):
+        from mp_agent import askrun
+        seen = {}
+
+        class Fake:
+            def ask(self, system, prompt, cwd):
+                seen.update(system=system, prompt=prompt)
+                from mp_agent.providers import Reply
+                return Reply("Because the contract says so (C2).", 0, 0.1)
+
+        answer, problem = askrun.ask(self.a_run(), "why are ties alphabetical?", Fake())
+        self.assertIsNone(problem)
+        self.assertEqual(answer, "Because the contract says so (C2).")
+        self.assertIn("why are ties alphabetical?", seen["prompt"])
+        self.assertIn("ties broken alphabetically", seen["prompt"])
+        self.assertIn("cannot change it", seen["system"])
+
+    def test_an_empty_question_and_a_broken_model_both_say_so(self):
+        from mp_agent import askrun
+        from mp_agent.providers import Reply
+
+        class Broken:
+            def ask(self, *a):
+                return Reply("boom", 1, 0.1)
+
+        self.assertEqual(askrun.ask(self.a_run(), "   ", Broken())[1], "ask something")
+        self.assertIn("could not run", askrun.ask(self.a_run(), "why?", Broken())[1])
+
+
+class PausingBetweenPasses(unittest.TestCase):
+    def test_a_job_holds_when_asked_and_carries_on_when_released(self):
+        import threading
+        from mp_agent.contract import Contract
+        from mp_agent.worker import UnitSpec, Worker
+        ctx = context(Script("worker"), Script("judge"), Script("planner"))
+        worker = Worker(ctx, UnitSpec(name="main", goal="g", contract=Contract(["x"], []), check=None, owns=None),
+                        make_repo())
+        self.assertFalse(ctx.paused())
+        self.assertEqual(ctx.wait_if_paused(worker), "")            # nothing set: no waiting
+        write(ctx.run.dir, "pause", "hold\n")
+        self.assertTrue(ctx.paused())
+
+        def person():
+            if wait_for(os.path.join(ctx.run.dir, "question.json"), timeout=20):
+                tmp = os.path.join(ctx.run.dir, "answer.json.tmp")
+                with open(tmp, "w") as fh:
+                    json.dump({"answer": "use the helper in utils.py"}, fh)
+                os.replace(tmp, os.path.join(ctx.run.dir, "answer.json"))
+        threading.Thread(target=person, daemon=True).start()
+        said = ctx.wait_if_paused(worker)
+        self.assertIn("utils.py", said)                             # passed on to the builders
+        self.assertFalse(ctx.paused(), "releasing clears the hold")
+        self.assertIn("utils.py", ctx.steer())

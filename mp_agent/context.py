@@ -405,6 +405,36 @@ class Context:
         self.say(f"   you asked for a change: {words.splitlines()[0][:160]}")
         return words
 
+    def paused(self):
+        """True when the person has asked the job to stop at the end of this pass."""
+        return os.path.exists(os.path.join(self.run.dir, "pause"))
+
+    def wait_if_paused(self, worker):
+        """Between passes, if you asked it to hold: show where it is and wait. Returns what you
+        said to pass on, or "". Releasing is answering; the file goes either way."""
+        path = os.path.join(self.run.dir, "pause")
+        if not os.path.exists(path) or not self.options.ask or self.alone():
+            return ""
+        spec = worker.spec
+        where = (f"Paused after pass {worker.passes} of {spec.name}, before the next one starts.\n\n"
+                 f"Last time round: {worker.feedback.splitlines()[0][:200] if worker.feedback else 'it was approved'}")
+        self.question_choices = [{"label": "CARRY ON", "answer": "go"}, {"label": "STOP", "answer": "stop"}]
+        answer = self.ask_person(spec.name, where + "\n\nReply 'go' to carry on, 'stop' to end the run, or say "
+                                                    "anything you want the builders to know.")
+        self.question_choices = None
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        words = (answer or "").strip()
+        one = words.lower().strip(".,!")
+        if one in ("stop", "no", "cancel"):
+            self.halt("stopped by you")
+            return ""
+        if not words or one in ("go", "ok", "okay", "yes", "y", "carry on", "continue", "go on"):
+            return ""
+        return self.say_to_job(words)
+
     # --- saying something while it runs -------------------------------------------
 
     def say_to_job(self, text):

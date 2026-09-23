@@ -104,6 +104,16 @@ which case it plans (or designs) again with your words in front of it and shows 
 result. A bare "go" carries on; anything longer is treated as a change, because "go up to PB
 as well" is a change request, not permission.
 
+**Pause at the next pass** holds the job at the end of the pass it is on, rather than only
+at the three checkpoints. It shows where it has got to and waits: carry on, stop, or say
+something, which is passed to the builders as guidance.
+
+**Asking about a run** is the other direction. `mp-agent ask "why did it drop that?"`, or
+the box in the workshop, hands a read-only model the run's own papers — the task, the
+contract, the decisions, what each reviewer said, the change so far, the log — and it
+answers you. It changes nothing and instructs nobody: to change what a job is doing, say it.
+It answers about a finished run too, which is often when the question occurs to you.
+
 **Saying something while it runs** needs no checkpoint. The SAY SOMETHING box is there
 whenever a job is live, and what you write reaches the builders on their next pass and goes
 on the decisions log, so a reviewer does not object to work you asked for. It is guidance:

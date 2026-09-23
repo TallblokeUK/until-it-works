@@ -24,6 +24,7 @@
     mp-agent where [--json] [--refresh]  where a job can run: recent local projects, GitHub repos, new, one-off
     mp-agent pr [--run DIR] [--base BRANCH]   push a finished run's branch and open a GitHub pull request
     mp-agent github [--repo DIR] [--name N] [--owner O] [--public]   put a finished project on GitHub
+    mp-agent ask [--run DIR] "question"  ask about a run; it reads the papers and answers
     mp-agent queue add [start flags] "task" | list | remove ID | run-next   jobs that run one after another
     mp-agent history [--json]            where the time and money went, and which judges object
     mp-agent bench [--list] [--task T] [--combo "worker=X,judge=Y"] [--repeat N]   compare model line-ups
@@ -729,6 +730,40 @@ def resolve(argv, which):
 SELFTEST_TASK = "Fix add() in calc.py so python3 test_calc.py prints ok"
 
 
+def ask_command(argv):
+    """mp-agent ask [--run DIR] "question" — ask about a run and get an answer. Changes nothing."""
+    from . import askrun, keys
+    p = argparse.ArgumentParser(prog="mp-agent ask", description=ask_command.__doc__)
+    p.add_argument("question", nargs="+")
+    p.add_argument("--run", help="run folder (default: the newest)")
+    p.add_argument("--model", help="who answers (default: the run's own planner)")
+    p.add_argument("--json", action="store_true")
+    args = p.parse_args(argv)
+    target = args.run
+    if not target:
+        names = sorted(os.listdir(RUNS), reverse=True) if os.path.isdir(RUNS) else []
+        target = next((os.path.join(RUNS, n) for n in names
+                       if os.path.exists(os.path.join(RUNS, n, "task.md"))), None)
+    if not target or not os.path.isdir(target):
+        print("NEEDS: no run to ask about", file=sys.stderr)
+        return 3
+    spec = args.model or askrun.who_answers(target)
+    try:
+        spec = models.resolve(spec, installed_models())
+    except models.ChoiceError as exc:
+        print(f"NEEDS: {exc}", file=sys.stderr)
+        return 3
+    project = open(os.path.join(target, "repo")).read().strip() if os.path.exists(os.path.join(target, "repo")) else None
+    agent = make_agent(spec, 300, worker=False, key_env=keys.environment(STATE))
+    answer, problem = askrun.ask(target, " ".join(args.question), agent,
+                                 cwd=project if project and os.path.isdir(project) else None)
+    if problem:
+        print(json.dumps({"error": problem}) if args.json else f"NEEDS: {problem}", file=sys.stderr)
+        return 1
+    print(json.dumps({"answer": answer, "model": spec}) if args.json else answer)
+    return 0
+
+
 def github_command(argv):
     """Put a project on GitHub: create the repository and push, or push to the remote it has.
     Nothing is created until you say so, and it refuses rather than guesses."""
@@ -1411,6 +1446,8 @@ def main(argv):
         return stop(argv[1:])
     if argv and argv[0] in ("keep", "discard"):
         return resolve(argv[1:], argv[0])
+    if argv and argv[0] == "ask":
+        return ask_command(argv[1:])
     if argv and argv[0] == "github":
         return github_command(argv[1:])
     if argv and argv[0] == "pregate":

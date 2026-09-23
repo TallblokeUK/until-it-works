@@ -118,6 +118,7 @@ def state(wanted=None, project=None):
         "run": os.path.basename(run),
         "live": bool(live),
         "alone": os.path.exists(os.path.join(run, "alone")),
+        "paused": os.path.exists(os.path.join(run, "pause")),
         "task": read(os.path.join(run, "task.md")).strip(),
         "phase": read(os.path.join(run, "phase")).strip(),
         "log": log,
@@ -349,6 +350,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok = proc.returncode == 0 and "Started:" in out
             return self.reply(200 if ok else 409, "application/json" if ok else "text/plain",
                               json.dumps({"detail": out}).encode() if ok else out.replace("NEEDS: ", "").encode())
+        if path == "/api/pause":
+            body = self.body()
+            run = str(body.get("run") or "")
+            if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
+                return self.reply(400, "text/plain", b"which run?")
+            marker = os.path.join(RUNS, run, "pause")
+            if body.get("on"):
+                with open(marker, "w") as fh:
+                    fh.write("hold at the end of this pass\n")
+            elif os.path.exists(marker):
+                os.remove(marker)
+            return self.reply(200, "application/json", json.dumps({"paused": bool(body.get("on"))}).encode())
+        if path == "/api/ask":
+            body = self.body()
+            run, question = str(body.get("run") or ""), str(body.get("question") or "").strip()
+            if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
+                return self.reply(400, "text/plain", b"which run?")
+            if not question or len(question) > 2000:
+                return self.reply(400, "text/plain", b"ask something (up to 2000 characters)")
+            entry = os.path.join(os.path.dirname(os.path.realpath(__file__)), "mp-agent")
+            proc = subprocess.run([sys.executable, entry, "ask", "--run", os.path.join(RUNS, run), "--json", question],
+                                  capture_output=True, text=True, timeout=420)
+            if proc.returncode != 0:
+                return self.reply(400, "text/plain", (proc.stderr or proc.stdout).strip()[-300:].encode())
+            return self.reply(200, "application/json", (proc.stdout or "{}").encode())
         if path == "/api/say":
             body = self.body()
             run, text = str(body.get("run") or ""), str(body.get("text") or "").strip()
