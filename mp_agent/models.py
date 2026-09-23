@@ -255,6 +255,16 @@ def load_pregate(state_dir):
     return {"mode": mode, "threshold": threshold}
 
 
+CHECKPOINTS = ("plan", "design", "wave")
+
+
+def load_checkpoints(state_dir):
+    """Where a job stops to show you what it is about to build on, before it does.
+    Empty by default: a job runs straight through unless you ask it not to."""
+    saved = _load(state_dir).get("checkpoints") or []
+    return [c for c in CHECKPOINTS if c in saved]
+
+
 def load_unattended(state_dir):
     """What a job with nobody watching does when a model cannot be used at all:
     "switch" to another one and carry on, or "stop"."""

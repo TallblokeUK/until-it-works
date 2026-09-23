@@ -38,6 +38,7 @@ class Options:
     max_usd: float = 0.0           # spending cap on real money (not Claude on Max), 0 = none
     shape: str = "auto"            # auto (the planner decides), solo or swarm
     design: str = "auto"           # auto (the planner decides), on or off: a designer settles the look first
+    checkpoints: tuple = ()        # where to stop and show you: plan, design, wave
     unattended: str = "switch"     # nobody watching and a model cannot be used: switch to another, or stop
     auto_rejudge: int = 1          # times a crashed reviewer is simply run again before asking
 
@@ -381,6 +382,55 @@ class Context:
                 return str(json.load(fh).get("answer") or "").strip()
         except (OSError, ValueError, AttributeError):
             return None
+
+    def checkpoint(self, where, heading, body):
+        """Stop and show the person what is about to be built on. Returns "" to carry on, or
+        what they want changed. Only at the points they asked for, and never when nobody is there."""
+        if where not in (self.options.checkpoints or ()) or not self.options.ask or self.alone():
+            return ""
+        self.question_choices = [{"label": "GO ON", "answer": "go"},
+                                 {"label": "STOP", "answer": "stop"}]
+        answer = self.ask_person(where, f"{heading}\n\n{body}\n\nReply 'go' to carry on, 'stop' to end the run, "
+                                        "or say what you want changed and it will be done again.")
+        self.question_choices = None
+        words = (answer or "").strip()
+        # Only a bare "go" is approval. Matching the first word read "go up to PB as well" — a
+        # change request — as permission to carry on, which is the opposite of what was asked.
+        one = words.lower().strip(".,!")
+        if not words or one in ("go", "ok", "okay", "yes", "y", "fine", "carry on", "continue", "go on", "go ahead"):
+            return ""
+        if one in ("stop", "no", "cancel"):
+            self.halt("stopped by you")
+            return ""
+        self.say(f"   you asked for a change: {words.splitlines()[0][:160]}")
+        return words
+
+    # --- saying something while it runs -------------------------------------------
+
+    def say_to_job(self, text):
+        """Something the person watching wants the workers to know. It is guidance, not a
+        contract line: it reaches the next pass and the decisions log, and changes nothing else."""
+        text = (text or "").strip()
+        if not text:
+            return ""
+        path = os.path.join(self.run.dir, "steer.md")
+        with self._question_lock:
+            with open(path, "a") as fh:
+                fh.write(text + "\n\n")
+        self.say(f"   you said: {text.splitlines()[0][:160]}")
+        return text
+
+    def steer(self):
+        """What the person has said since the last pass, handed over once."""
+        path = os.path.join(self.run.dir, "steer.md")
+        with self._question_lock:
+            try:
+                with open(path) as fh:
+                    said = fh.read().strip()
+                os.remove(path)
+            except OSError:
+                return ""
+        return said
 
     def alone(self):
         """True when nobody is waiting: the job was started that way, or you pressed

@@ -44,6 +44,25 @@ project, a GitHub repository, a new project or a one-off) and which models.
 **START** runs it now; **ADD TO QUEUE** runs it after whatever is already
 running.
 
+## Working with it, not just watching it
+
+A job need not be one shot. Two things let you work with it the way you would with a person:
+
+**Stop and show me.** Tick **the plan**, **the design brief** or **each wave of a swarm** in
+MODELS (or `mp-agent config --checkpoints plan,design`), and the job pauses at those points
+and shows you what it is about to build on. Answer **go**, **stop**, or say what you want
+changed — it plans again with your words and shows you the result. Only a bare "go" carries
+on: "go up to PB as well" is a change, not permission.
+
+The plan checkpoint is the one worth having. It shows the contract, what is out of scope,
+the check command and the acceptance tests about to be frozen — and once those are frozen
+they decide the shape of the answer.
+
+**Say something while it works.** The **SAY SOMETHING** box sits beside a running job. What
+you write reaches the builders on their next pass and goes on the decisions log, so a
+reviewer does not object to something you asked for. It is guidance, not a new contract
+line: it never overrides the contract, the frozen tests or which files a worker owns.
+
 ## Carrying on without you
 
 A job asks you when it cannot settle something itself, and waits. If you are going out,

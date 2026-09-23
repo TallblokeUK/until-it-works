@@ -48,6 +48,22 @@ def collect_screenshots(shots_dir, run_dir, since):
     return kept
 
 
+def plan_summary(plan):
+    """The plan as a person reads it: what done means, what is out of scope, how it is checked."""
+    contract = plan.get("contract") or {}
+    lines = [plan.get("summary", ""), ""]
+    lines += ["Done means:"] + [f"  - {item}" for item in contract.get("done") or []]
+    if contract.get("out_of_scope"):
+        lines += ["", "Out of scope:"] + [f"  - {item}" for item in contract["out_of_scope"]]
+    lines += ["", f"Checked by: {plan.get('check', '(nothing)')}"]
+    if plan.get("tests"):
+        lines += [f"Acceptance tests first, frozen after: {', '.join(plan['tests'].get('files') or [])}",
+                  f"  covering: {plan['tests'].get('goal', '')}"]
+    if plan.get("mode") == "swarm":
+        lines += ["", "Built in parts: " + ", ".join(s.get("id", "?") for s in plan.get("subtasks") or [])]
+    return "\n".join(lines)
+
+
 class Orchestrator:
     def __init__(self, ctx, task, repo, trees_root, check_override=None, use_planner=True, state_dir=None,
                  resume=None):
@@ -151,6 +167,9 @@ class Orchestrator:
                                                        "agent-check.sh or pass --check", mode=None))
         if not self.rules_loaded:
             self.load_rules()
+        plan = self.agree_plan(plan)
+        if plan is None:
+            return self.finish(self.outcome(False, f"NOT approved: {ctx.stop_reason or 'stopped by you'}", mode=None))
         run.write_json("plan.json", plan)
         self.design(plan)
         contract = Contract.from_dict(plan["contract"])
@@ -239,6 +258,25 @@ class Orchestrator:
             return self.finish(self.outcome(False, result.outcome, mode=mode))
         return self.finish(self.outcome(True, self.approved_line(), mode=mode), success=True)
 
+    def agree_plan(self, plan, tries=3):
+        """Show the plan before anything is built, if that was asked for. Returns the plan to
+        build (theirs or a re-planned one), or None if they stopped it."""
+        ctx = self.ctx
+        for _ in range(tries):
+            wanted = ctx.checkpoint("plan", "This is the plan, before anything is built.", plan_summary(plan))
+            if not wanted:
+                return None if ctx.should_stop() else plan
+            self.say("   planning again with what you asked for")
+            ctx.run.phase("planning again")
+            fresh, problem = planner.make_plan(ctx, f"{self.task}\n\n# What the person asked for\n\n{wanted}",
+                                               self.tree, self.check_override, memory="", shape=ctx.options.shape)
+            if fresh is None:
+                self.say(f"   could not re-plan ({problem}); the plan stands")
+                return plan
+            plan = fresh
+            self.say(f"   plan: {plan['mode']} — {plan.get('summary', '')}".rstrip(" —"))
+        return plan
+
     def design(self, plan):
         """A job that changes what someone looks at gets its look settled first, in writing."""
         ctx = self.ctx
@@ -257,6 +295,16 @@ class Orchestrator:
         if not brief:
             self.say("   the designer could not write a brief; building without one")
             return
+        for _ in range(3):
+            wanted = ctx.checkpoint("design", "This is how it is meant to look, before it is built.",
+                                    design.direction(brief) + "\n\n" + brief[:1500])
+            if not wanted or ctx.should_stop():
+                break
+            self.say("   designing again with what you asked for")
+            fresh = design.write(ctx, f"{self.task}\n\n# What the person asked for\n\n{wanted}", plan, self.tree)
+            if not fresh:
+                break
+            brief = fresh
         ctx.design_brief = design.section(brief)
         line = design.direction(brief)
         self.say(f"   design: {line}" if line else "   design: the brief is written")
@@ -365,6 +413,15 @@ class Orchestrator:
             if failed:
                 kept = f"; {', '.join(approved + to_merge)} approved and merged" if approved or to_merge else ""
                 return "NOT approved: " + "; ".join(f"{r.name}: {r.outcome}" for r in failed) + kept
+
+            if number < len(order):
+                said = ctx.checkpoint("wave", f"Wave {number} of {len(order)} is merged: "
+                                              f"{', '.join(approved + to_merge)}.",
+                                      "The next wave is: " + ", ".join(order[number]))
+                if said:
+                    ctx.say_to_job(said)
+                if ctx.should_stop():
+                    return f"NOT approved: {ctx.stop_reason}"
 
             merged_ids = approved + to_merge
             checks = [subtasks[i].get("check") for i in merged_ids if subtasks[i].get("check")]

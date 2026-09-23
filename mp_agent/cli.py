@@ -149,6 +149,9 @@ def parser():
     p.add_argument("--no-ask", action="store_true", help="never wait for you; stop NOT approved instead")
     p.add_argument("--skills", choices=("off", "workers"),
                    help="let the builders load the skills installed on this machine (Claude Code only)")
+    p.add_argument("--checkpoint", action="append", choices=models.CHECKPOINTS, dest="checkpoints", default=None,
+                   help="stop and show you before building on it: --checkpoint plan --checkpoint design "
+                        "--checkpoint wave (repeatable)")
     p.add_argument("--alone", action="store_true",
                    help="settle what the job can by itself (a model out of credit, workers that need upgrading); "
                         "a real question still waits for you")
@@ -242,6 +245,7 @@ def list_models(argv):
                           "unattended": models.load_unattended(STATE),
                           "pregate": models.load_pregate(STATE),
                           "skills": models.load_skills(STATE),
+                          "checkpoints": models.load_checkpoints(STATE),
                           "max_usd": float(extra.get("max_usd") or 0)}))
         return 0
     for role in models.ROLES:
@@ -276,6 +280,8 @@ def set_config(argv):
                    help="jobs with nobody watching: switch to another model when one cannot be used, or stop")
     p.add_argument("--skills", choices=("off", "workers"),
                    help="whether the builders may load the skills installed on this machine")
+    p.add_argument("--checkpoints", help="where jobs stop to show you: plan, design, wave (comma separated, "
+                                         "or 'none')")
     p.add_argument("--pre-gate", choices=("off", "watch", "on"),
                    help="a cheap calibrated look before the panel: off, watch (ask and record, convene everyone), "
                         "or on (skip a member it is confident about)")
@@ -291,6 +297,15 @@ def set_config(argv):
     p.add_argument("--claude-billing", choices=("subscription", "api"),
                    help="how Claude Code is paid for: your Claude login (default) or your stored Anthropic API key")
     args = p.parse_args(argv)
+    if args.checkpoints is not None:
+        wanted = [w.strip() for w in args.checkpoints.split(",") if w.strip() and w.strip() != "none"]
+        unknown = [w for w in wanted if w not in models.CHECKPOINTS]
+        if unknown:
+            print(f"not changed: no checkpoint called '{unknown[0]}' (there are: {', '.join(models.CHECKPOINTS)})",
+                  file=sys.stderr)
+            return 1
+        models.save_extra(STATE, {"checkpoints": wanted})
+        print("checkpoints: " + (", ".join(wanted) if wanted else "none, jobs run straight through"))
     if args.skills:
         models.save_extra(STATE, {"skills": args.skills})
         print("skills: " + ("the builders may load them" if args.skills == "workers" else "off"))
@@ -1517,6 +1532,8 @@ def main(argv):
     options = Options(workers=args.workers, patience=args.patience, churn=args.churn, panel_size=args.panel,
                       review=not args.no_critic, audit=not args.no_audit, ask=not args.no_ask, keep=args.keep,
                       budget_minutes=args.budget, max_calls=args.max_calls, shape=args.shape or "auto",
+                      checkpoints=tuple(args.checkpoints if args.checkpoints is not None
+                                        else models.load_checkpoints(STATE)),
                       design=args.design or "auto",
                       unattended=args.unattended or models.load_unattended(STATE),
                       max_usd=args.max_usd if args.max_usd is not None else float(models.load_extra(STATE).get("max_usd") or 0))

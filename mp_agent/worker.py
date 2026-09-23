@@ -131,6 +131,14 @@ class Worker:
                          "It must exit 0. The harness runs it after you finish; its result, not your opinion, decides.")
         else:
             parts.append("## Validation\n\nThere is no automated check for this unit; reviewers judge it against the contract.")
+        said = self.ctx.steer()
+        if said:
+            # on the decisions log too, so a reviewer does not object to work the person asked for
+            ident = self.ctx.decisions.add(f"The person watching said: {said}", s.name, kind="steer")
+            parts.append(f"## What the person watching just said\n\n{said}\n\nFollow it where it does not "
+                         f"conflict with anything above. It is guidance, and it never overrides the contract, the "
+                         f"frozen tests or which files you may change. It is on the decisions log as {ident}; if it "
+                         f"contradicts the contract, say so in your reply rather than quietly doing one or the other.")
         if s.guidance:
             parts.append(f"## Guidance from the planner\n\n{s.guidance}")
         if self.feedback:

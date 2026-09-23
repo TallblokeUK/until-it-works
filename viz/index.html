@@ -217,6 +217,8 @@
   .answer input{flex:1;min-width:0;font:inherit;font-size:22px;background:#0d0b1e;color:#fff;border:2px solid var(--gold);padding:6px 10px}
   .answer button{font-family:var(--pixel);font-size:10px;background:var(--gold);color:#141024;border:0;padding:8px 12px;cursor:pointer}
   .answer button.quick{background:#2d2757;color:var(--gold);border:2px solid var(--gold)}
+  .panel.say .answer{display:flex;gap:8px} .panel.say input{flex:1}
+  .checkrow{display:flex;gap:14px;flex-wrap:wrap;margin-top:4px}
   button.again{background:#2d2757;color:var(--gold);border:2px solid var(--gold);font-size:12px;padding:2px 6px;cursor:pointer}
   .result{margin-top:16px;border:3px solid var(--green);background:#0e2a18;padding:12px 14px}
   .result.bad{border-color:var(--red);background:#2a0e12}
@@ -449,6 +451,11 @@
         <label>Panel <small>three lenses before the judge</small><select id="set-panel"></select></label>
         <label>Judge <small>the final audit, the last word</small><select id="set-judge"></select></label>
         <label>Spending cap per job <small>money billed to API keys, in $ (subscriptions aren't counted); blank = none</small><input id="set-cap" inputmode="decimal" placeholder="none"></label>
+        <label>Stop and show me <small>before it builds on them</small><span class="checkrow">
+          <label class="setupbilling"><input type="checkbox" id="cp-plan"> the plan</label>
+          <label class="setupbilling"><input type="checkbox" id="cp-design"> the design brief</label>
+          <label class="setupbilling"><input type="checkbox" id="cp-wave"> each wave of a swarm</label>
+        </span></label>
         <label>Before the panel <small>a cheap calibrated look (needs a TypeSafe key)</small><select id="set-pregate">
           <option value="off">off: the whole panel reads every pass</option>
           <option value="watch">watch: ask and record, but convene everyone</option>
@@ -502,6 +509,12 @@
     </div>
     </main>
     <aside class="right">
+    <div class="panel say" id="sayPanel" hidden>
+      <div class="label">SAY SOMETHING <span class="dim">the builders get it on their next pass</span></div>
+      <div class="answer"><input id="sayText" placeholder="the colours are wrong, use brand.css"><button type="button" id="sayBtn">SEND</button></div>
+      <div class="how" id="sayStatus"></div>
+    </div>
+
     <div class="question" id="question" hidden>
       <div class="label">WAITING FOR YOU</div>
       <div class="q" id="qtext"></div>
@@ -1132,6 +1145,7 @@ function renderHud() {
   });
   $("stopRun").hidden = !(S.live && !DEMO);
   $("aloneBtn").hidden = !(S.live && !DEMO);
+  $("sayPanel").hidden = !(S.live && !DEMO);
   $("aloneBtn").textContent = S.alone ? "WAITING FOR YOU AGAIN" : "CARRY ON WITHOUT ME";
   $("aloneBtn").style.borderColor = S.alone ? "var(--ok)" : "";
   const q = S.live && S.question && S.question.question;
@@ -2185,6 +2199,7 @@ $("openSettings").addEventListener("click", async () => {
     $("set-stuck").value = up.mode;
     $("set-unattended").value = modelInfo.unattended || "switch";
     $("set-pregate").value = (modelInfo.pregate || {}).mode || "off";
+    for (const where of ["plan", "design", "wave"]) $("cp-" + where).checked = (modelInfo.checkpoints || []).includes(where);
     $("set-pregate-threshold").value = (modelInfo.pregate || {}).threshold ?? 0.9;
     $("set-upgradeto").innerHTML = '<option value="">the strongest available</option>';
     for (const o of modelInfo.available) { const opt = document.createElement("option"); opt.value = o.spec; opt.textContent = o.label; $("set-upgradeto").appendChild(opt); }
@@ -2199,6 +2214,7 @@ $("saveSettings").addEventListener("click", async () => {
   body.max_usd = $("set-cap").value.trim() === "" ? 0 : $("set-cap").value.trim();
   body.when_stuck = $("set-stuck").value;
   body.unattended = $("set-unattended").value;
+  body.checkpoints = ["plan", "design", "wave"].filter((where) => $("cp-" + where).checked);
   body.pregate = $("set-pregate").value;
   body.pregate_threshold = $("set-pregate-threshold").value.trim();
   body.upgrade_to = $("set-upgradeto").value;
@@ -2207,6 +2223,16 @@ $("saveSettings").addEventListener("click", async () => {
     $("settingsStatus").textContent = res.ok ? "saved: the next runs use these" : `not saved: ${await res.text()}`;
   } catch (e) { $("settingsStatus").textContent = "not saved: the visualizer server is not running"; }
 });
+async function sendSay() {
+  const text = $("sayText").value.trim();
+  if (!text) return;
+  const res = await postJSON("api/say", { run: S.run, text });
+  $("sayStatus").textContent = res.ok ? (await res.json()).detail : await res.text();
+  if (res.ok) $("sayText").value = "";
+}
+$("sayBtn").addEventListener("click", sendSay);
+$("sayText").addEventListener("keydown", (e) => { if (e.key === "Enter") sendSay(); });
+
 $("aloneBtn").addEventListener("click", async () => {
   const on = !S.alone;
   const res = await postJSON("api/alone", { run: S.run, on });

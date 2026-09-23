@@ -349,6 +349,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok = proc.returncode == 0 and "Started:" in out
             return self.reply(200 if ok else 409, "application/json" if ok else "text/plain",
                               json.dumps({"detail": out}).encode() if ok else out.replace("NEEDS: ", "").encode())
+        if path == "/api/say":
+            body = self.body()
+            run, text = str(body.get("run") or ""), str(body.get("text") or "").strip()
+            if not re.match(r"^[0-9A-Za-z._-]+$", run) or not os.path.isdir(os.path.join(RUNS, run)):
+                return self.reply(400, "text/plain", b"which run?")
+            if not text or len(text) > 4000:
+                return self.reply(400, "text/plain", b"say something (up to 4000 characters)")
+            path_to = os.path.join(RUNS, run, "steer.md")
+            with open(path_to, "a") as fh:
+                fh.write(text + "\n\n")
+            return self.reply(200, "application/json",
+                              json.dumps({"detail": "the builders get it on their next pass"}).encode())
         if path == "/api/alone":
             body = self.body()
             run = str(body.get("run") or "")
@@ -601,6 +613,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 args += ["--unattended", wanted["unattended"]]
             if wanted.get("skills") in ("off", "workers"):
                 args += ["--skills", wanted["skills"]]
+            if isinstance(wanted.get("checkpoints"), list):
+                args += ["--checkpoints", ",".join(wanted["checkpoints"]) or "none"]
             if wanted.get("pregate") in ("off", "watch", "on"):
                 args += ["--pre-gate", wanted["pregate"]]
             if str(wanted.get("pregate_threshold") or "").strip():

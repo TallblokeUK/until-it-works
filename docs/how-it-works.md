@@ -85,6 +85,31 @@ No key, a failed call, a timeout: the panel runs in full. It is an optimisation,
 dependency. Switch it off, or back to watching without skipping, in MODELS or with
 `mp-agent config --pre-gate off|watch|on`.
 
+## Working in phases
+
+A job can run straight through, or it can stop and show you what it is about to build on.
+Neither is the default for the other's sake: checkpoints are off until you ask for them.
+
+**Checkpoints** (`mp-agent config --checkpoints plan,design,wave`, or the tick boxes in
+MODELS) stop the loop at the points where a decision becomes expensive to change:
+
+- **plan** — the contract, what is out of scope, the check command and which acceptance
+  tests are about to be frozen. This is the one that matters: after this, the tests fix the
+  shape of the solution and nobody can argue with them.
+- **design** — the brief, before anything is built to it.
+- **wave** — after each wave of a swarm is merged, before the next starts.
+
+Each shows you what it has, and takes **go**, **stop**, or *what you want changed* — in
+which case it plans (or designs) again with your words in front of it and shows you the
+result. A bare "go" carries on; anything longer is treated as a change, because "go up to PB
+as well" is a change request, not permission.
+
+**Saying something while it runs** needs no checkpoint. The SAY SOMETHING box is there
+whenever a job is live, and what you write reaches the builders on their next pass and goes
+on the decisions log, so a reviewer does not object to work you asked for. It is guidance:
+it never overrides the contract, the frozen tests or which files a worker owns, and a worker
+that finds it contradicts the contract is told to say so rather than quietly pick one.
+
 ## The designer
 
 Nothing else in the loop owns the look. A planner writes what must be true, a worker
