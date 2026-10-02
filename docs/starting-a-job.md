@@ -74,7 +74,10 @@ If you work in Claude Code, the mod that ships in `mod/` puts them above the pro
 ```
 
 Then, while a job runs, a line above the prompt says what phase it is in, which part is on
-which pass, how long it has been going and what it has spent. When the job needs you, that
+which pass, how long it has been going and what it has spent, and the pane draws the workshop
+itself — the same cast as the browser one, in terminal cells: a builder per part in the
+part's colour, Checkbot's visor blinking through the check, Red Pen at a review, one intern
+per panel lens, and the Judge at the bench. When the job needs you, that
 line turns into **mp-agent needs you** with a key to press: `1` answers "go on" and `2` opens
 the pane, which shows the question in full with the same buttons the workshop has, and a field
 to type a longer answer — or to say something to the builders when nothing is being asked.

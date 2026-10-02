@@ -1,7 +1,7 @@
 {
   "name": "mp-agent",
-  "version": "0.1.1",
-  "description": "Watch an mp-agent job from inside Claude Code, and answer it without leaving the prompt.",
+  "version": "0.2.0",
+  "description": "Watch an mp-agent job from inside Claude Code: the workshop in the terminal, and answer it without leaving the prompt.",
   "author": {
     "name": "mp-agent"
   },

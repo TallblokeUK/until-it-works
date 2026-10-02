@@ -174,6 +174,55 @@ test('holding asks the job to wait, and letting go releases it', async ($, on) =
   expect(ran).toContainEqual(['mp-agent', 'pause', '--off'])
 })
 
+test('the workshop repaints itself while the pane is open and a job is live', async ($, on) => {
+  const ran: string[][] = []
+  const clock = mock.clock(on)
+  const frames: string[] = []
+  on('ui.blit', ($, e) => {
+    frames.push(e.cells)
+    return { value: undefined }
+  })
+  cli(on, () => RUNNING, ran)
+
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  // Nothing is painted until somebody opens the pane.
+  await clock.advance(1000)
+  expect(frames).toEqual([])
+
+  await $.ui.mount(PANE)
+  await clock.advance(1000)
+  expect(frames.length).toBeGreaterThan(1)
+  // Two frames, alternating: the cast moves rather than standing still.
+  expect(new Set(frames).size).toBe(2)
+})
+
+test('a finished job is not animated', async ($, on) => {
+  const ran: string[][] = []
+  const clock = mock.clock(on)
+  const frames: string[] = []
+  on('ui.blit', ($, e) => {
+    frames.push(e.cells)
+    return { value: undefined }
+  })
+  cli(on, () => ({ ...RUNNING, live: false, phase: 'finished', approved: true, question: null }), ran)
+
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.ui.mount(PANE)
+  await clock.advance(2000)
+  expect(frames).toEqual([])
+})
+
+test('the desktop app gets the words rather than a worse picture', async ($, on) => {
+  const ran: string[][] = []
+  mock.clock(on)
+  cli(on, () => RUNNING, ran)
+
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /· api/ })).toBeDefined()
+})
+
 test('an idle machine is not asked every two seconds', async ($, on) => {
   const ran: string[][] = []
   const clock = mock.clock(on)

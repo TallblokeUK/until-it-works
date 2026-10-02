@@ -12,8 +12,10 @@
  * already looking at, with the buttons the workshop has.
  */
 import { atom, read, update } from 'claude-code'
+import { render as renderScene, SWARM_HELMETS } from './scene.js'
 
 const PANE = 'mp-agent'
+const FRAME_MS = 120 // the cast's two-frame animation, while the pane is open and a job is live
 const LIVE_MS = 2000 // while a job is running, and the band is showing something that moves
 const IDLE_MS = 10000 // while nothing is, so an idle session is not spawning a process a second
 
@@ -21,6 +23,15 @@ const IDLE_MS = 10000 // while nothing is, so an idle session is not spawning a 
 // they should survive a reload while you are editing this file, and writing them redraws.
 const job = atom({ plugin: 'mp-agent', key: 'job' }, null)
 const said = atom({ plugin: 'mp-agent', key: 'said' }, '')
+
+// The frame counter lives in a module variable, not in $.state: a write to state redraws
+// every reader, and the whole point of blitting is to repaint the picture without that.
+let tick = 0
+// What the pane last drew, so a frame can be repainted at the same size, and whether the
+// pane is open at all: blitting into a pane nobody has open is work for nothing.
+let painting = null
+let paneOpen = false
+
 
 const minutes = (seconds) => (seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`)
 
@@ -63,6 +74,17 @@ export function register(on) {
     await $.command.register({ name: 'mp-agent-job', description: 'Watch the mp-agent job in a pane' })
     await poll($)
     // One timer, which decides its own pace: a live job moves, an idle machine does not.
+    // The cast's two frames. A blit repaints the one element without running the render
+    // hook, so the animation costs no redraw of the pane's words and no model's attention.
+    $.clock.every(FRAME_MS, async () => {
+      if (!paneOpen || !painting) return
+      const snap = await read($, job)
+      if (!snap || !snap.live) return
+      tick += 1
+      const scene = renderScene(snap, painting.columns, tick)
+      await $.ui.blit({ requestId: PANE, key: 'workshop', columns: scene.columns, rows: scene.rows, cells: scene.cells })
+    })
+
     let since = 0
     $.clock.every(LIVE_MS, async () => {
       const snap = await read($, job)
@@ -78,7 +100,13 @@ export function register(on) {
   on('command.run', { command: 'mp-agent-job' }, async ($) => {
     await poll($)
     await $.ui.open({ id: PANE, title: 'mp-agent', focus: true, closeOnEscape: true })
+    paneOpen = true
     return {}
+  })
+
+  on('ui.close', async ($, e, next) => {
+    if (e.id === PANE) paneOpen = false
+    return next(e)
   })
 
   // The band: one line while a job runs, and the question when there is one. Nothing otherwise,
@@ -99,7 +127,10 @@ export function register(on) {
                  onPress: () => told($, ['answer', 'go'], 'carrying on') }),
         Text({ children: ['  '] }),
         Button({ key: 'band-open', label: 'read it', hotkey: '2', plain: true,
-                 onPress: () => $.ui.open({ id: PANE, title: 'mp-agent', focus: true, closeOnEscape: true }) }),
+                 onPress: async () => {
+                   await $.ui.open({ id: PANE, title: 'mp-agent', focus: true, closeOnEscape: true })
+                   paneOpen = true
+                 } }),
       )
     } else if (snap.paused) {
       row.push(Text({ children: ['  holding at the next pass'], dimColor: true }))
@@ -111,24 +142,40 @@ export function register(on) {
   // something. The field answers the question when one is waiting, and otherwise steers.
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    const { Box, Text, Button, Input } = $.ui.resolve(e)
+    const { Box, Text, Button, Input, Raster } = $.ui.resolve(e)
     const snap = await read($, job)
     const note = await read($, said)
     if (!snap) {
       return Text({ children: ['No mp-agent job to show. Start one with /mp-agent.'] })
     }
 
-    const children = [
+    const children = []
+
+    // The workshop, where the surface can draw cells. Desktop has no Raster, so it gets the
+    // words alone rather than a worse picture.
+    if (Raster && e.surface === 'terminal') {
+      const columns = Math.max(16, (e.props.bodyColumns || 40) - 1)
+      painting = { columns }
+      paneOpen = true
+      const scene = renderScene(snap, columns, tick)
+      children.push(Raster({ key: 'workshop', columns: scene.columns, rows: scene.rows, cells: scene.cells }))
+    }
+
+    children.push(
       Text({ children: [(snap.task || snap.run || '').split('\n')[0].slice(0, 200)], bold: true }),
       Text({ children: [snap.live ? line(snap) : `finished · ${snap.outcome || ''}`.slice(0, 200)], dimColor: true }),
       Text({ children: [' '] }),
-    ]
+    )
 
+    const busy = (snap.units || []).filter((u) => u.state && u.state !== 'approved' && u.state !== 'stopped')
     for (const unit of snap.units || []) {
       const mark = unit.state === 'approved' ? '✓' : unit.state === 'stopped' ? '✗' : '·'
+      const helmet = busy.length > 1 ? SWARM_HELMETS[busy.indexOf(unit) % SWARM_HELMETS.length] : -1
+      const colour = helmet >= 0 && busy.includes(unit) ? '#' + helmet.toString(16).padStart(6, '0') : undefined
       children.push(Text({
         children: [`${mark} ${unit.name}  ${unit.phase || unit.state}`.slice(0, 200)],
         dimColor: unit.state === 'approved',
+        color: colour,
       }))
     }
 
