@@ -1,7 +1,9 @@
 {
   "name": "mp-agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Watch an mp-agent job from inside Claude Code, and answer it without leaving the prompt.",
-  "author": { "name": "mp-agent" },
+  "author": {
+    "name": "mp-agent"
+  },
   "types": "./types/index.d.ts"
 }
