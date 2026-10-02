@@ -205,7 +205,9 @@ export function reading(snap) {
     checking: /check/.test(where),
     reviewing: /review/.test(where) && !/panel/.test(where),
     panel: /panel|lens/.test(where),
-    judging: /audit|judge|final/.test(where),
+    // "pre-audit panel" has the word audit in it, and so does the panel's own unit. The
+    // Judge's gavel only goes up for the final audit, which happens after the panel.
+    judging: /final audit|judging/.test(where) && !/panel|lens/.test(where),
     waves: working,
   }
 }

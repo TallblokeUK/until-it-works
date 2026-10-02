@@ -92,6 +92,10 @@ test('the phase decides who is on stage', async () => {
   expect(reading({ ...base, phase: 'pass 1: fast review', units: [{ name: 'api', state: 'working', phase: 'pass 1: fast review', passes: 1 }] }).reviewing).toBe(true)
   expect(reading({ ...base, phase: 'pass 1: panel (edges, truth)', units: [{ name: 'api', state: 'working', phase: 'pass 1: panel', passes: 1 }] }).panel).toBe(true)
   expect(reading({ ...base, phase: 'pass 1: final audit (claude:sonnet)', units: [{ name: 'main', state: 'working', phase: 'pass 1: final audit', passes: 1 }] }).judging).toBe(true)
+  // The real phase string a job writes while the panel sits. It has "audit" in it, so the
+  // Judge's gavel went up a stage early until this was pinned down.
+  expect(reading({ ...base, phase: 'pass 1: pre-audit panel', units: [{ name: 'final', state: 'working', phase: 'pass 1: pre-audit panel', passes: 1 }] }).judging).toBe(false)
+  expect(reading({ ...base, phase: 'pass 1: pre-audit panel', units: [{ name: 'final', state: 'working', phase: 'pass 1: pre-audit panel', passes: 1 }] }).panel).toBe(true)
   // A panel is not a plain review, or Red Pen and the interns would both be marking.
   expect(reading({ ...base, phase: 'pass 1: panel (edges, truth)', units: [] }).reviewing).toBe(false)
 })

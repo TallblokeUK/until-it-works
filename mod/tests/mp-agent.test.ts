@@ -223,6 +223,45 @@ test('the desktop app gets the words rather than a worse picture', async ($, on)
   expect(await ui.find({ type: 'Text', text: /· api/ })).toBeDefined()
 })
 
+test('it finds the CLI where the installer puts it, not only on the PATH', async ($, on) => {
+  const tried: string[] = []
+  mock.clock(on)
+  on('env.get', () => ({ value: '/tmp/a-home' }))
+  on('process.run', ($, e) => {
+    const argv = e.argv as string[]
+    tried.push(argv[0])
+    // A bare PATH, as a process started without a login shell gets.
+    if (argv[0] === 'mp-agent') return { value: { exitCode: 127, stdout: '', stderr: 'not found' } }
+    if (argv[0] === '/tmp/a-home/.local/bin/mp-agent') {
+      return { value: { exitCode: 0, stdout: JSON.stringify(RUNNING), stderr: '' } }
+    }
+    return { value: { exitCode: 127, stdout: '', stderr: 'not found' } }
+  })
+  on('command.register', () => ({ value: undefined }))
+  on('session.start', () => ({ cwd: '/work' }))
+  on('ui.render', () => ({ type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
+
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(tried).toContain('/tmp/a-home/.local/bin/mp-agent')
+  // Having found it, the band shows the job rather than nothing.
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: /wave 1\/2: api, store/ })).toBeDefined()
+})
+
+test('a session that cannot find mp-agent at all says so', async ($, on) => {
+  mock.clock(on)
+  on('env.get', () => ({ value: '/tmp/a-home' }))
+  on('process.run', () => ({ value: { exitCode: 127, stdout: '', stderr: 'not found' } }))
+  on('command.register', () => ({ value: undefined }))
+  on('session.start', () => ({ cwd: '/work' }))
+  on('ui.render', () => ({ type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
+
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const ui = await $.ui.mount(BAND)
+  // Not silence: silence is indistinguishable from "no job", which is the wrong thing to think.
+  expect(await ui.find({ type: 'Text', text: /is not on this session/ })).toBeDefined()
+})
+
 test('an idle machine is not asked every two seconds', async ($, on) => {
   const ran: string[][] = []
   const clock = mock.clock(on)

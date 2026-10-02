@@ -31,6 +31,12 @@ let tick = 0
 // pane is open at all: blitting into a pane nobody has open is work for nothing.
 let painting = null
 let paneOpen = false
+// How to reach the CLI. `mp-agent` installs into ~/.local/bin, which is on a login shell's
+// PATH but not on a bare one, and a mod that cannot find it would simply draw nothing for
+// ever. So it is looked for once, and if it is not there the band says so rather than
+// leaving somebody staring at an empty prompt wondering what they did wrong.
+let cli = ['mp-agent']
+let missing = ''
 
 
 const minutes = (seconds) => (seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`)
@@ -50,22 +56,46 @@ function line(snap) {
 
 /** Run an mp-agent command and keep what it said, so a press has a visible result. */
 async function told($, argv, note) {
-  const out = await $.process.run(['mp-agent', ...argv])
+  const out = await $.process.run([...cli, ...argv])
   const text = out.exitCode === 0 ? note : (out.stderr || out.stdout || 'that did not work').trim()
   await update($, said, () => text.split('\n')[0].slice(0, 120))
   return out.exitCode === 0
 }
 
+/** Find the CLI once: on the PATH, else where the installer puts it. */
+async function findCli($) {
+  const home = (await $.env.get('HOME')) || ''
+  for (const candidate of [['mp-agent'], [home + '/.local/bin/mp-agent'], ['/usr/local/bin/mp-agent']]) {
+    if (candidate[0].startsWith('/') && !home) continue
+    try {
+      const out = await $.process.run([...candidate, 'status', '--json'], { timeoutMs: 10000 })
+      if (out.exitCode === 0) {
+        cli = candidate
+        missing = ''
+        return true
+      }
+    } catch {
+      /* try the next one */
+    }
+  }
+  missing = 'mp-agent is not on this session\u2019s PATH'
+  return false
+}
+
 async function poll($) {
-  // A job that has gone is not an error, and neither is mp-agent not being installed: the mod
-  // simply has nothing to draw. Anything unexpected is left for the debug log.
+  // A job that has gone is not an error: there is simply nothing to draw. A CLI that cannot
+  // be run at all is an error, and one worth showing.
   try {
-    const out = await $.process.run(['mp-agent', 'status', '--json'], { timeoutMs: 10000 })
-    if (out.exitCode !== 0) return
+    const out = await $.process.run([...cli, 'status', '--json'], { timeoutMs: 10000 })
+    if (out.exitCode !== 0) {
+      if (await findCli($)) return poll($)
+      return
+    }
+    missing = ''
     const snap = JSON.parse(out.stdout)
     await update($, job, () => (snap && snap.run ? snap : null))
   } catch {
-    /* nothing to show */
+    await findCli($)
   }
 }
 
@@ -113,7 +143,11 @@ export function register(on) {
   // so a session that has never run a job looks exactly as it did before this mod was installed.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const snap = await read($, job)
-    if (!snap || !snap.live) return next(e)
+    if (!snap || !snap.live) {
+      if (!missing) return next(e)
+      const { Text } = $.ui.resolve(e)
+      return Text({ children: ['mp-agent: ' + missing], dimColor: true })
+    }
     const { Box, Text, Button } = $.ui.resolve(e)
     const question = snap.question
     const row = [
