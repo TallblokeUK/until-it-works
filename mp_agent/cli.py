@@ -46,7 +46,7 @@ import sys
 import tempfile
 import time
 
-from . import desktop, gitops, models, where as places
+from . import desktop, gitops, live, models, where as places
 from .context import Context, Options, notify
 from .contract import Decisions
 from .orchestrator import Orchestrator, start_visualizer
@@ -195,6 +195,48 @@ def answer(argv):
         json.dump({"answer": " ".join(args.text)}, fh)
     os.replace(tmp, os.path.join(target, "answer.json"))
     print(f"answered: {q.get('question')}")
+    return 0
+
+
+def say(argv):
+    """Tell a running job something, without being asked. Guidance for the next pass."""
+    p = argparse.ArgumentParser(prog="mp-agent say")
+    p.add_argument("text", nargs="+")
+    p.add_argument("--run", help="run folder (default: the job that is running)")
+    args = p.parse_args(argv)
+    target = live.live_run(args.run)
+    if not target:
+        print("no job is running", file=sys.stderr)
+        return 1
+    text = " ".join(args.text).strip()
+    if not text:
+        return 1
+    with open(os.path.join(target, "steer.md"), "a") as fh:
+        fh.write(text + "\n\n")
+    print(f"the builders will be told: {text}")
+    return 0
+
+
+def pause(argv):
+    """Ask a job to stop at the end of the current pass and wait for you. Again to let go."""
+    p = argparse.ArgumentParser(prog="mp-agent pause")
+    p.add_argument("--off", action="store_true", help="stop waiting and carry on")
+    p.add_argument("--run", help="run folder (default: the job that is running)")
+    args = p.parse_args(argv)
+    target = live.live_run(args.run)
+    if not target:
+        print("no job is running", file=sys.stderr)
+        return 1
+    path = os.path.join(target, "pause")
+    if args.off:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        print("carrying on")
+        return 0
+    open(path, "w").close()
+    print("it will stop at the end of this pass and wait for you")
     return 0
 
 
@@ -1492,7 +1534,17 @@ def main(argv):
         return keys_command(argv[1:])
     if argv and argv[0] == "test":
         return test_command(argv[1:])
+    if argv and argv[0] == "say":
+        return say(argv[1:])
+    if argv and argv[0] == "pause":
+        return pause(argv[1:])
     if argv and argv[0] == "status":
+        # --json is for something watching the job, such as the Claude Code mod; the
+        # human-readable status is a separate script.
+        if "--json" in argv[1:]:
+            rest = [a for a in argv[1:] if a != "--json"]
+            print(json.dumps(live.snapshot(rest[0] if rest else None)))
+            return 0
         os.execvp("mp-status", ["mp-status", *argv[1:]])
     args = parser().parse_args(argv)
     task = " ".join(args.task)

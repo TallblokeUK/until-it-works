@@ -63,6 +63,29 @@ you write reaches the builders on their next pass and goes on the decisions log,
 reviewer does not object to something you asked for. It is guidance, not a new contract
 line: it never overrides the contract, the frozen tests or which files a worker owns.
 
+## Without leaving Claude Code
+
+Both of those things live beside a running job in the workshop, which means a browser window.
+If you work in Claude Code, the mod that ships in `mod/` puts them above the prompt instead:
+
+```
+/plugin marketplace add TallblokeUK/until-it-works
+/plugin install mp-agent@until-it-works
+```
+
+Then, while a job runs, a line above the prompt says what phase it is in, which part is on
+which pass, how long it has been going and what it has spent. When the job needs you, that
+line turns into **mp-agent needs you** with a key to press: `1` answers "go on" and `2` opens
+the pane, which shows the question in full with the same buttons the workshop has, and a field
+to type a longer answer — or to say something to the builders when nothing is being asked.
+`/mp-agent-job` opens the pane whenever you want it.
+
+It only draws when there is a job, so a session that has never started one looks exactly as it
+did before. It reads the job through `mp-agent status --json` and acts on it through the same
+`mp-agent answer`, `say` and `pause` commands you can type yourself, so it can see and do
+nothing that you could not. To work on it, `claude --plugin-dir ./mod` loads it from a
+checkout and reloads on save, and `claude plugin test` runs its tests.
+
 ## Carrying on without you
 
 A job asks you when it cannot settle something itself, and waits. If you are going out,

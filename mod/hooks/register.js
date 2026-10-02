@@ -1,0 +1,189 @@
+/**
+ * mp-agent in Claude Code: a band above the prompt while a job runs, and a pane to answer it.
+ *
+ * A job runs in its own processes and can last an hour, so this mod owns none of it. It polls
+ * `mp-agent status --json` and draws what comes back, and the three things it can do to a job
+ * — answer a question, say something, hold at the next pass — it does by calling the same
+ * commands you would type. Nothing here reaches into the run folder, so the layout of a run
+ * stays the CLI's business and this stays a view.
+ *
+ * The point of it is the question. A job that needs a decision used to mean the workshop in a
+ * browser or `mp-agent answer` in another terminal; here it is a line above the prompt you are
+ * already looking at, with the buttons the workshop has.
+ */
+import { atom, read, update } from 'claude-code'
+
+const PANE = 'mp-agent'
+const LIVE_MS = 2000 // while a job is running, and the band is showing something that moves
+const IDLE_MS = 10000 // while nothing is, so an idle session is not spawning a process a second
+
+// The snapshot, and the last thing this mod did. Both in $.state: a drawing depends on them,
+// they should survive a reload while you are editing this file, and writing them redraws.
+const job = atom({ plugin: 'mp-agent', key: 'job' }, null)
+const said = atom({ plugin: 'mp-agent', key: 'said' }, '')
+
+const minutes = (seconds) => (seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`)
+
+/** One line of what is happening, short enough for the band. */
+function line(snap) {
+  const bits = [snap.phase || 'working']
+  const busy = (snap.units || []).filter((u) => u.state && u.state !== 'approved')
+  if (busy.length === 1) bits.push(`${busy[0].name} pass ${busy[0].passes}`)
+  else if (busy.length > 1) bits.push(`${busy.length} parts`)
+  bits.push(minutes(snap.elapsed || 0))
+  if (snap.usd) bits.push(`$${snap.usd.toFixed(2)}`)
+  return bits.join(' · ')
+}
+
+/** Run an mp-agent command and keep what it said, so a press has a visible result. */
+async function told($, argv, note) {
+  const out = await $.process.run(['mp-agent', ...argv])
+  const text = out.exitCode === 0 ? note : (out.stderr || out.stdout || 'that did not work').trim()
+  await update($, said, () => text.split('\n')[0].slice(0, 120))
+  return out.exitCode === 0
+}
+
+async function poll($) {
+  // A job that has gone is not an error, and neither is mp-agent not being installed: the mod
+  // simply has nothing to draw. Anything unexpected is left for the debug log.
+  try {
+    const out = await $.process.run(['mp-agent', 'status', '--json'], { timeoutMs: 10000 })
+    if (out.exitCode !== 0) return
+    const snap = JSON.parse(out.stdout)
+    await update($, job, () => (snap && snap.run ? snap : null))
+  } catch {
+    /* nothing to show */
+  }
+}
+
+export function register(on) {
+  on('session.start', async ($, e, next) => {
+    await $.command.register({ name: 'mp-agent-job', description: 'Watch the mp-agent job in a pane' })
+    await poll($)
+    // One timer, which decides its own pace: a live job moves, an idle machine does not.
+    let since = 0
+    $.clock.every(LIVE_MS, async () => {
+      const snap = await read($, job)
+      const wanted = snap && snap.live ? LIVE_MS : IDLE_MS
+      since += LIVE_MS
+      if (since < wanted) return
+      since = 0
+      await poll($)
+    })
+    return next(e)
+  })
+
+  on('command.run', { command: 'mp-agent-job' }, async ($) => {
+    await poll($)
+    await $.ui.open({ id: PANE, title: 'mp-agent', focus: true, closeOnEscape: true })
+    return {}
+  })
+
+  // The band: one line while a job runs, and the question when there is one. Nothing otherwise,
+  // so a session that has never run a job looks exactly as it did before this mod was installed.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const snap = await read($, job)
+    if (!snap || !snap.live) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const question = snap.question
+    const row = [
+      Text({ children: ['mp-agent '], dimColor: true }),
+      Text({ children: [question ? 'needs you' : line(snap)], bold: !!question, color: question ? 'yellow' : undefined }),
+    ]
+    if (question) {
+      row.push(
+        Text({ children: ['  '] }),
+        Button({ key: 'band-go', label: 'go on', hotkey: '1', plain: true,
+                 onPress: () => told($, ['answer', 'go'], 'carrying on') }),
+        Text({ children: ['  '] }),
+        Button({ key: 'band-open', label: 'read it', hotkey: '2', plain: true,
+                 onPress: () => $.ui.open({ id: PANE, title: 'mp-agent', focus: true, closeOnEscape: true }) }),
+      )
+    } else if (snap.paused) {
+      row.push(Text({ children: ['  holding at the next pass'], dimColor: true }))
+    }
+    return Box({ flexDirection: 'row', children: row })
+  })
+
+  // The pane: what it is doing, the question in full with its buttons, and a field to say
+  // something. The field answers the question when one is waiting, and otherwise steers.
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    if (e.requestId !== PANE) return next(e)
+    const { Box, Text, Button, Input } = $.ui.resolve(e)
+    const snap = await read($, job)
+    const note = await read($, said)
+    if (!snap) {
+      return Text({ children: ['No mp-agent job to show. Start one with /mp-agent.'] })
+    }
+
+    const children = [
+      Text({ children: [(snap.task || snap.run || '').split('\n')[0].slice(0, 200)], bold: true }),
+      Text({ children: [snap.live ? line(snap) : `finished · ${snap.outcome || ''}`.slice(0, 200)], dimColor: true }),
+      Text({ children: [' '] }),
+    ]
+
+    for (const unit of snap.units || []) {
+      const mark = unit.state === 'approved' ? '✓' : unit.state === 'stopped' ? '✗' : '·'
+      children.push(Text({
+        children: [`${mark} ${unit.name}  ${unit.phase || unit.state}`.slice(0, 200)],
+        dimColor: unit.state === 'approved',
+      }))
+    }
+
+    const question = snap.live ? snap.question : null
+    if (question) {
+      children.push(Text({ children: [' '] }))
+      children.push(Text({ children: [(question.question || '').slice(0, 2000)], color: 'yellow' }))
+      const choices = (question.choices || []).slice(0, 4)
+      if (choices.length) {
+        children.push(Box({
+          flexDirection: 'row',
+          columnGap: 2,
+          children: choices.map((choice, i) =>
+            Button({
+              key: `choice-${i}`,
+              label: choice.label || choice.answer,
+              onPress: () => told($, ['answer', choice.answer], `answered: ${choice.answer}`),
+            })),
+        }))
+      }
+    }
+
+    children.push(Text({ children: [' '] }))
+    children.push(Input({
+      key: 'say',
+      label: question ? 'Answer' : 'Say',
+      placeholder: question ? 'Type your answer and press Enter' : 'Tell the builders something',
+      value: '',
+      submitLabel: question ? 'answer' : 'say',
+      onSubmit: async (value) => {
+        const text = (value || '').trim()
+        if (!text) return
+        if (question) await told($, ['answer', text], `answered: ${text}`)
+        else await told($, ['say', text], `said: ${text}`)
+        await poll($)
+      },
+    }))
+
+    if (snap.live && !question) {
+      children.push(Box({
+        flexDirection: 'row',
+        columnGap: 2,
+        children: [
+          Button({
+            key: 'hold',
+            label: snap.paused ? 'carry on' : 'hold at next pass',
+            onPress: async () => {
+              await told($, snap.paused ? ['pause', '--off'] : ['pause'],
+                        snap.paused ? 'carrying on' : 'it will stop after this pass')
+              await poll($)
+            },
+          }),
+        ],
+      }))
+    }
+
+    if (note) children.push(Text({ children: [note], dimColor: true }))
+    return Box({ flexDirection: 'column', children })
+  })
+}

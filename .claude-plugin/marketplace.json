@@ -1,0 +1,14 @@
+{
+  "name": "until-it-works",
+  "description": "The Claude Code mod that comes with Until It Works: watch a job of agents and answer it from the prompt.",
+  "owner": {
+    "name": "Until It Works"
+  },
+  "plugins": [
+    {
+      "name": "mp-agent",
+      "source": "./mod",
+      "description": "Watch an mp-agent job from inside Claude Code, and answer it without leaving the prompt."
+    }
+  ]
+}

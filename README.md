@@ -120,6 +120,7 @@ finished. [How it works](docs/how-it-works.md) has the detail.
 | [What the numbers say](docs/benchmarks.md) | measured line-ups: what works, what it costs, and how to repeat it |
 | [How it works](docs/how-it-works.md) | the loop, contracts, escalation, safety rails, the workshop |
 | [Adding a tool](docs/adapters.md) | supporting another AI coding tool |
+| [The Claude Code mod](mod/README.md) | watching and answering a job from the prompt |
 | [Lessons from the first version](docs/lessons.md) | what was measured, and why the final judge earns its cost |
 
 ## Commands
@@ -129,7 +130,10 @@ finished. [How it works](docs/how-it-works.md) has the detail.
 | `mp-viz` | open the workshop (or use the app icon) |
 | `mp-agent start "task"` | start a job from a terminal (`--repo`, `--github`, `--new`, `--oneoff`) |
 | `mp-status` | what's running, and any question waiting for you |
+| `mp-agent status --json` | the same, for something watching the job |
 | `mp-agent answer "…"` | answer that question |
+| `mp-agent say "…"` | tell a running job something, without being asked |
+| `mp-agent pause` | ask it to stop at the end of this pass (`--off` to let go) |
 | `mp-agent setup` / `models` / `keys` / `test MODEL` | setup from a terminal |
 | `mp-agent selftest` | check everything, then run one tiny real job (also a button in SETUP) |
 | `mp-agent protect add owner/repo` | never push to that repository (also in SETUP) |

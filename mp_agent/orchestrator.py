@@ -354,7 +354,11 @@ class Orchestrator:
             reason = ctx.should_stop()
             if reason:
                 return f"NOT approved: {reason}"
-            self.say(f"── wave {number}/{len(order)}: {', '.join(wave)}")
+            # Say when there are more parts than slots: the extras are not stuck, they start as
+            # slots free, but a part that appears to begin late is otherwise a mystery in the log.
+            slots = max(1, ctx.options.workers)
+            capped = f" ({slots} at a time)" if len(wave) > slots else ""
+            self.say(f"── wave {number}/{len(order)}: {', '.join(wave)}{capped}")
             run_phase = f"wave {number}/{len(order)}: {', '.join(wave)}"
             ctx.run.phase(run_phase)
             base = gitops.head(self.tree)
