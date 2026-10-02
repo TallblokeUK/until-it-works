@@ -85,6 +85,35 @@ No key, a failed call, a timeout: the panel runs in full. It is an optimisation,
 dependency. Switch it off, or back to watching without skipping, in MODELS or with
 `mp-agent config --pre-gate off|watch|on`.
 
+## Your own gates
+
+Every judge in this loop is a model. A hook is a program, and it gets the same moment and
+can refuse — which makes it the right place for rules a model should not be asked to weigh:
+"nothing is approved while the formatter is unhappy", "no new dependency without a line in
+DEPENDENCIES.md".
+
+An executable file named after the moment:
+
+```
+<project>/.mp-agent/hooks/<event>     this project's gates, in your checkout
+~/.mp-agent/hooks/<event>             yours, for every project
+```
+
+The moments are **plan** (written, before anything is built), **unit-done** (a unit is about
+to be called approved) and **job-done** (the whole job is). The moment arrives as JSON on
+stdin — the contract, the check, the unit, where the work is — and the exit code answers:
+
+- **0** carry on
+- **2** no: whatever it printed goes back to the workers as feedback, and they keep working
+- **anything else** the hook itself is broken; it is logged and ignored, because a hook that
+  cannot run must not be able to stop a job
+
+Two properties worth knowing. They are read from **your checkout, never the worktree**, so a
+job cannot install or edit the gate that judges it — though they run with the worktree as
+their working directory, so they see the work in progress. And a refusal at `unit-done` is
+not an opinion to argue with: the workers are told to deal with it, not to decline it with a
+contract citation the way they may with a reviewer.
+
 ## Working in phases
 
 A job can run straight through, or it can stop and show you what it is about to build on.

@@ -411,5 +411,12 @@ class Worker:
                     continue
 
             commit = gitops.commit_all(self.tree, f"mp-agent [{s.name}]: {s.goal.splitlines()[0][:72]}")
+            refused = self.ctx.unit_hook(self, commit)
+            if refused:
+                # a hook is a program, not an opinion: there is nothing to argue with
+                self.feedback = ("A gate of the person's own refused this. Deal with what it says, then make "
+                                 f"validation pass again.\n\n{refused}")
+                skip_implement = False
+                continue
             self.say(f"   {s.name} approved after {self.passes} pass(es)")
             return self.result(True, "approved", commit)

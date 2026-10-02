@@ -1594,6 +1594,7 @@ def main(argv):
         if found:
             run.say(f"skills     {len(found)} available to the builders: "
                     + ", ".join(s["name"] for s in found[:6]) + ("…" if len(found) > 6 else ""))
+    ctx.state_dir = STATE
     ctx.designer = designer
     ctx.upgrade = models.load_upgrade(STATE)
     ctx.make_worker = lambda spec: wrap(spec, worker=True, skills=worker_skills)

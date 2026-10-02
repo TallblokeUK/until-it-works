@@ -11,7 +11,7 @@ import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-from . import design, gitops, memory, planner, rules
+from . import design, gitops, hooks, memory, planner, rules
 from .contract import Contract
 from .waves import waves
 from .worker import UnitSpec, Worker
@@ -117,6 +117,7 @@ class Orchestrator:
 
     def run(self):
         ctx, run = self.ctx, self.ctx.run
+        ctx.project = self.repo               # where a person's own gates live (hooks.py)
         run.write_text("repo", self.repo + "\n")
         self.say(f"task       {self.task}")
         self.say(f"repo       {self.repo}")
@@ -171,6 +172,14 @@ class Orchestrator:
         if plan is None:
             return self.finish(self.outcome(False, f"NOT approved: {ctx.stop_reason or 'stopped by you'}", mode=None))
         run.write_json("plan.json", plan)
+        refused = self.hook("plan", {"task": self.task, "mode": plan.get("mode"), "summary": plan.get("summary"),
+                                     "contract": (plan.get("contract") or {}).get("done"),
+                                     "out_of_scope": (plan.get("contract") or {}).get("out_of_scope"),
+                                     "check": plan.get("check"),
+                                     "tests": (plan.get("tests") or {}).get("files")})
+        if refused:
+            return self.finish(self.outcome(False, f"NOT approved: a plan hook refused it: {refused[:300]}",
+                                            mode=plan.get("mode")))
         self.design(plan)
         contract = Contract.from_dict(plan["contract"])
         mode = plan["mode"]
@@ -458,8 +467,23 @@ class Orchestrator:
                 shutil.rmtree(path, ignore_errors=True)
                 self.say(f"removed a stray folder an agent created: {path}")
 
+    def hook(self, event, moment):
+        """A gate of the person's own (hooks.py), at a moment the loop decides something."""
+        return hooks.run(event, {"event": event, "project": self.repo, "tree": self.tree,
+                                 "branch": self.branch, "run": self.ctx.run.dir, **moment},
+                         self.repo, self.state_dir, cwd=self.tree, say=self.say)
+
     def finish(self, metadata, success=False):
         ctx = self.ctx
+        if metadata.get("approved"):
+            # the last gate before a job is called done, and it is not a model's opinion
+            refused = self.hook("job-done", {"mode": metadata.get("mode"), "task": self.task})
+            if refused:
+                metadata = {**metadata, "approved": False,
+                            "outcome": f"NOT approved: a job-done hook refused it: {refused[:300]}"}
+                success = False
+                self.say("")
+                self.say(metadata["outcome"])
         gitops.drop_refs(self.repo, gitops.cline_refs(self.repo) - self.cline_refs_before)
         self.drop_strays()
         if success and not ctx.options.keep:

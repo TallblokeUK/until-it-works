@@ -61,6 +61,8 @@ class Context:
         self.project_rules = ""        # the project's own instructions (rules.py), for every role
         self.design_brief = ""         # how this job's work is meant to look (design.py), for every role
         self.skills_shelf = ""         # the skills installed here, offered to the builders (skills.py)
+        self.state_dir = ""            # ~/.mp-agent, for the gates a person installs (hooks.py)
+        self.project = ""              # the person's own checkout, where their gates live
         self.designer = None           # the model that decides the look, when a job needs one
         # upgrading the workers when they are stuck (set by the CLI; tests may leave them unset)
         self.upgrade = {"mode": "never", "to": "", "max": 0}
@@ -382,6 +384,15 @@ class Context:
                 return str(json.load(fh).get("answer") or "").strip()
         except (OSError, ValueError, AttributeError):
             return None
+
+    def unit_hook(self, worker, commit=None):
+        """A gate of the person's own on a unit being called approved. "" carries on."""
+        from . import hooks
+        return hooks.run("unit-done", {"event": "unit-done", "unit": worker.spec.name, "goal": worker.spec.goal,
+                                       "passes": worker.passes, "commit": commit, "run": self.run.dir,
+                                       "project": self.project, "contract": worker.spec.contract.done,
+                                       "tree": worker.tree},
+                         self.project, self.state_dir, cwd=worker.tree, say=worker.say)
 
     def checkpoint(self, where, heading, body):
         """Stop and show the person what is about to be built on. Returns "" to carry on, or
