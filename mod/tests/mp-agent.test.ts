@@ -99,6 +99,23 @@ test('a question reaches the band, and one key answers it', async ($, on) => {
   expect(ran).toContainEqual(['mp-agent', 'answer', 'go'])
 })
 
+test('a question in the phase does not flood the pane', async ($, on) => {
+  const ran: string[][] = []
+  mock.clock(on)
+  // What a waiting job really writes: the whole plan, in the phase.
+  const wordy = {
+    ...ASKING,
+    phase: 'waiting for you: This is the plan, before anything is built.\n\nDone means:\n  - a lot\n  - of lines\n',
+  }
+  cli(on, () => wordy, ran)
+
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const ui = await $.ui.mount(PANE)
+  // The status line is one line, and the plan is not in it.
+  expect(await ui.find({ type: 'Text', text: /Done means/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^waiting for you: This is the plan, before anything is built\. · api pass 2 · 5m · \$0\.12$/ })).toBeDefined()
+})
+
 test('the pane lists the parts and the question, and a choice button answers', async ($, on) => {
   const ran: string[][] = []
   mock.clock(on)

@@ -26,7 +26,9 @@ const minutes = (seconds) => (seconds < 60 ? `${seconds}s` : `${Math.round(secon
 
 /** One line of what is happening, short enough for the band. */
 function line(snap) {
-  const bits = [snap.phase || 'working']
+  // While a job waits for an answer its phase holds the whole question - the contract, what
+  // is out of scope, every line of it. That belongs in the pane's body, not in a status line.
+  const bits = [(snap.phase || 'working').split('\n')[0].slice(0, 80)]
   const busy = (snap.units || []).filter((u) => u.state && u.state !== 'approved')
   if (busy.length === 1) bits.push(`${busy[0].name} pass ${busy[0].passes}`)
   else if (busy.length > 1) bits.push(`${busy.length} parts`)
