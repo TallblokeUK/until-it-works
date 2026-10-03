@@ -12,7 +12,7 @@
  * already looking at, with the buttons the workshop has.
  */
 import { atom, read, update } from 'claude-code'
-import { render as renderScene, SWARM_HELMETS } from './scene.js'
+import { fresh, render as renderScene, SWARM_HELMETS } from './scene.js'
 
 const PANE = 'mp-agent'
 const FRAME_MS = 120 // the cast's two-frame animation, while the pane is open and a job is live
@@ -37,6 +37,14 @@ let paneOpen = false
 // leaving somebody staring at an empty prompt wondering what they did wrong.
 let cli = ['mp-agent']
 let missing = ''
+// The question the pane last scrolled to. A new one is worth moving the window for; a redraw
+// of the same one is not, or the pane would yank itself back while you were reading upwards.
+let scrolledTo = ''
+// The last snapshot, kept beside the one in $.state. The timers decide their own pace and
+// paint their own frames from this; $.state is for the drawings, which redraw when it is
+// written. A timer that had to read state to decide what to do would be doing engine work
+// every tick for an answer it already has.
+let latest = null
 
 
 const minutes = (seconds) => (seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`)
@@ -82,6 +90,16 @@ async function findCli($) {
   return false
 }
 
+/** Bring the part you can act on into view: the question, and the field under it. */
+async function reveal($) {
+  if (!paneOpen) return
+  try {
+    await $.ui.scroll({ to: { key: 'say' }, in: PANE, block: 'end' })
+  } catch {
+    /* the pane went away */
+  }
+}
+
 async function poll($) {
   // A job that has gone is not an error: there is simply nothing to draw. A CLI that cannot
   // be run at all is an error, and one worth showing.
@@ -93,7 +111,17 @@ async function poll($) {
     }
     missing = ''
     const snap = JSON.parse(out.stdout)
-    await update($, job, () => (snap && snap.run ? snap : null))
+    // A question that has just arrived is the one thing worth moving the window for. This
+    // happens before the state is written, so a redraw cannot get between the two.
+    const asking = fresh(snap, scrolledTo)
+    if (asking) {
+      scrolledTo = asking
+      await reveal($)
+    } else if (!(snap && snap.question)) {
+      scrolledTo = ''
+    }
+    latest = snap && snap.run ? snap : null
+    await update($, job, () => latest)
   } catch {
     await findCli($)
   }
@@ -107,18 +135,15 @@ export function register(on) {
     // The cast's two frames. A blit repaints the one element without running the render
     // hook, so the animation costs no redraw of the pane's words and no model's attention.
     $.clock.every(FRAME_MS, async () => {
-      if (!paneOpen || !painting) return
-      const snap = await read($, job)
-      if (!snap || !snap.live) return
+      if (!paneOpen || !painting || !latest || !latest.live) return
       tick += 1
-      const scene = renderScene(snap, painting.columns, tick)
+      const scene = renderScene(latest, painting.columns, tick)
       await $.ui.blit({ requestId: PANE, key: 'workshop', columns: scene.columns, rows: scene.rows, cells: scene.cells })
     })
 
     let since = 0
     $.clock.every(LIVE_MS, async () => {
-      const snap = await read($, job)
-      const wanted = snap && snap.live ? LIVE_MS : IDLE_MS
+      const wanted = latest && latest.live ? LIVE_MS : IDLE_MS
       since += LIVE_MS
       if (since < wanted) return
       since = 0
@@ -131,6 +156,7 @@ export function register(on) {
     await poll($)
     await $.ui.open({ id: PANE, title: 'mp-agent', focus: true, closeOnEscape: true })
     paneOpen = true
+    await reveal($)
     return {}
   })
 
@@ -164,6 +190,7 @@ export function register(on) {
                  onPress: async () => {
                    await $.ui.open({ id: PANE, title: 'mp-agent', focus: true, closeOnEscape: true })
                    paneOpen = true
+                   await reveal($)
                  } }),
       )
     } else if (snap.paused) {
@@ -187,7 +214,8 @@ export function register(on) {
 
     // The workshop, where the surface can draw cells. Desktop has no Raster, so it gets the
     // words alone rather than a worse picture.
-    if (Raster && e.surface === 'terminal') {
+    const bodyRows = (e.props.scroll && e.props.scroll.bodyRows) || 20
+    if (Raster && e.surface === 'terminal' && bodyRows >= 15) {
       const columns = Math.max(16, (e.props.bodyColumns || 40) - 1)
       painting = { columns }
       paneOpen = true

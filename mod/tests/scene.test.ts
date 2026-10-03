@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { CAST, FIGURE, LENS_HELMET, SWARM_HELMETS, at, buffer, figure, pack, reading, rect, render } from '../hooks/scene.js'
+import { CAST, FIGURE, LENS_HELMET, SWARM_HELMETS, at, buffer, figure, fresh, pack, reading, rect, render } from '../hooks/scene.js'
 
 /** Unpack what a Raster is given, so a test can read the cells back as numbers. */
 function cellsOf(packed: { columns: number; rows: number; cells: string }) {
@@ -183,4 +183,20 @@ test('the scene stays inside the palette the terminal can paint at once', async 
 test('with no job at all it draws somebody asleep rather than nothing', async () => {
   const idle = render(null, 40, 0)
   expect(colours(idle).size).toBeGreaterThan(1)
+})
+
+test('the pane scrolls to a question once, not every time it looks', async () => {
+  const quiet = { run: 'r', live: true, question: null, units: [] }
+  const asking = { ...quiet, question: { question: 'Which status code?' } }
+
+  // Nothing to show while nothing is being asked.
+  expect(fresh(quiet, '')).toBe('')
+  // A question arrives: worth moving the window for.
+  expect(fresh(asking, '')).toBe('Which status code?')
+  // Still the same question two seconds later: leave the reader where they are.
+  expect(fresh(asking, 'Which status code?')).toBe('')
+  // A different question is new again.
+  expect(fresh({ ...quiet, question: { question: 'And the cache header?' } }, 'Which status code?')).toBe('And the cache header?')
+  // A finished job is not asking anything, whatever its last question said.
+  expect(fresh({ ...asking, live: false }, '')).toBe('')
 })

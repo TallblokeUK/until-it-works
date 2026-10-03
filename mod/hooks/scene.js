@@ -185,6 +185,18 @@ export function pack(buf) {
   return { columns: buf.width, rows, cells: base64(new Uint8Array(words.buffer)) }
 }
 
+/**
+ * The question a watcher has not been shown yet, or "" when there is nothing new to show.
+ *
+ * The pane scrolls itself to a question when one arrives, and must not scroll again while
+ * the same one is still being asked: somebody reading back up the pane would be dragged to
+ * the bottom every two seconds.
+ */
+export function fresh(snap, shown) {
+  const asking = (snap && snap.live && snap.question && snap.question.question) || ''
+  return asking && asking !== shown ? asking : ''
+}
+
 /** Who the phase says is at work, and what each of them is doing. */
 export function reading(snap) {
   const phase = ((snap && snap.phase) || '').toLowerCase()

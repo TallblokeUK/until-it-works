@@ -262,6 +262,23 @@ test('a session that cannot find mp-agent at all says so', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /is not on this session/ })).toBeDefined()
 })
 
+test('a pane too short for both drops the picture, not the question', async ($, on) => {
+  const ran: string[][] = []
+  mock.clock(on)
+  on('ui.blit', () => ({ value: undefined }))
+  on('ui.scroll', () => ({ value: undefined }))
+  cli(on, () => ASKING, ran)
+
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const tall = await $.ui.mount(PANE)
+  expect(await tall.find({ type: 'Raster' })).toBeDefined()
+  await tall.unmount()
+
+  const short = await $.ui.mount({ ...PANE, props: { ...PANE.props, scroll: { offset: 0, bodyRows: 10 } } })
+  expect(await short.find({ type: 'Raster' })).toBeUndefined()
+  expect(await short.find({ type: 'Text', text: /The plan is three parts/ })).toBeDefined()
+})
+
 test('an idle machine is not asked every two seconds', async ($, on) => {
   const ran: string[][] = []
   const clock = mock.clock(on)
